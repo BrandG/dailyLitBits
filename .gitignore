@@ -1,0 +1,18 @@
+# Security (Keep secrets local!)
+.env
+
+# Python build artifacts
+__pycache__/
+*.pyc
+
+# Virtual Environments
+venv/
+.venv/
+env/
+
+# IDE settings (Optional, keeps repo clean)
+.idea/
+.vscode/
+
+# OS Junk
+.DS_Store
