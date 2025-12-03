@@ -4,8 +4,12 @@ from cryptography.fernet import Fernet
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail
 from datetime import datetime
+import pytz  # <--- NEW: Timezone handling
 import config
 import security
+
+# --- CONFIGURATION ---
+TARGET_HOUR = 6  # 6 AM Local Time
 
 # Setup using Config
 client = MongoClient(config.MONGO_URI)
@@ -13,18 +17,11 @@ db = client[config.DB_NAME]
 cipher = Fernet(config.ENCRYPTION_KEY)
 
 def format_email_html(title, sequence, content, unsub_token, recap=None):
-    """
-    Wraps the raw text in a simple, book-like HTML template.
-    Includes an optional 'Previously on...' recap section.
-    """
-    # Convert plain text newlines to HTML breaks
+    # (Same as before)
     html_content = content.replace('\n\n', '</p><p>').replace('\n', '<br>')
-    
-    # Build Unsubscribe URL
     base_url = "https://dailylitbits.com"
     unsub_link = f"{base_url}/unsubscribe?token={unsub_token}"
 
-    # Build Recap Block (if it exists)
     recap_html = ""
     if recap and sequence > 1:
         recap_html = f"""
@@ -40,9 +37,7 @@ def format_email_html(title, sequence, content, unsub_token, recap=None):
         <h2 style="color: #2c3e50; border-bottom: 2px solid #eee; padding-bottom: 10px;">
             {title}
         </h2>
-        
         {recap_html}
-        
         <div style="font-size: 18px;">
             <p>{html_content}</p>
         </div>
@@ -61,26 +56,20 @@ def send_via_sendgrid(to_email, subject, html_body):
         to_emails=to_email,
         subject=subject,
         html_content=html_body)
-    
     try:
         sg = SendGridAPIClient(config.SENDGRID_API_KEY)
         response = sg.send(message)
-        print(f"   [API] Status Code: {response.status_code}")
         return response.status_code == 202
     except Exception as e:
         print(f"   [ERROR] SendGrid failed: {e}")
         return False
 
-def send_daily_emails(debug=False):
-    print(f"--- STARTING DISPATCH RUN: {datetime.now()} (Debug={debug}) ---")
+def send_daily_emails(debug=False, force=False):
+    """
+    force=True: Ignores the 6am time check (useful for testing)
+    """
+    print(f"--- STARTING DISPATCH RUN: {datetime.now()} (Debug={debug}, Force={force}) ---")
     
-    # Count them first for debugging visibility
-    total_active = db.subscriptions.count_documents({"status": "active"})
-    print(f"Found {total_active} active subscriptions.")
-
-    if total_active == 0:
-        print("   [WARNING] No active subscriptions found. Did you sign up or finish the book?")
-
     active_subs = db.subscriptions.find({"status": "active"})
     count = 0
     
@@ -89,22 +78,50 @@ def send_daily_emails(debug=False):
         book_id = sub['book_id']
         seq = sub['current_sequence']
         sub_id = sub['_id']
+        last_sent = sub.get('last_sent')
 
-        print(f"Processing Sub {sub_id} (User: {user_id} | Book: {book_id} | Seq: {seq})...")
-        
-        # 1. Decrypt Email
+        # 1. Fetch User to get Timezone
         user = db.users.find_one({"_id": user_id})
         if not user: 
-            print(f"   [ERROR] User {user_id} not found in 'users' collection. Skipping.")
+            print(f"   [ERROR] User {user_id} not found. Skipping.")
             continue
-            
+
+        # --- TIMEZONE LOGIC START ---
+        user_tz_str = user.get('timezone', 'UTC')
+        try:
+            user_tz = pytz.timezone(user_tz_str)
+        except pytz.UnknownTimeZoneError:
+            print(f"   [WARNING] Unknown timezone '{user_tz_str}' for user. Defaulting to UTC.")
+            user_tz = pytz.utc
+
+        # Get current time in User's location
+        user_now = datetime.now(pytz.utc).astimezone(user_tz)
+        
+        # Check 1: Is it 6 AM? (Unless forcing)
+        if not force and user_now.hour != TARGET_HOUR:
+            # Silent skip so logs aren't flooded every hour
+            # print(f"   [INFO] Skipping {user_id}: It is {user_now.hour}:00 in {user_tz_str} (Waiting for {TARGET_HOUR}:00)")
+            continue
+
+        # Check 2: Did we already send today?
+        if last_sent:
+            # Convert last_sent (UTC stored in Mongo) to User's TZ
+            last_sent_local = last_sent.replace(tzinfo=pytz.utc).astimezone(user_tz)
+            if last_sent_local.date() == user_now.date():
+                print(f"   [INFO] Skipping {user_id}: Already sent today ({last_sent_local.strftime('%Y-%m-%d')}).")
+                continue
+        # --- TIMEZONE LOGIC END ---
+
+        print(f"Processing Sub {sub_id} (It is {user_now.hour}:00 in {user_tz_str})...")
+
+        # 2. Decrypt Email
         try:
             email = cipher.decrypt(user['email_enc']).decode()
         except Exception:
             print(f"   [ERROR] Skipping {user_id}: Decryption failed.")
             continue
 
-        # 2. Get Content
+        # 3. Get Content
         chunk = db.chunks.find_one({"book_id": book_id, "sequence": seq})
         if not chunk:
             print(f"   [INFO] Chunk {seq} missing. Marking {book_id} as finished for {email}!")
@@ -114,51 +131,50 @@ def send_daily_emails(debug=False):
             )
             continue
 
-        # 3. Prepare Email
+        # 4. Prepare Email
         book = db.books.find_one({"book_id": book_id})
         book_title = book['title'] if book else "Your Book"
         subject = f"{book_title}: Part {seq}"
         
         unsub_token = security.generate_unsub_token(sub_id)
-        
-        # Grab the recap from the chunk (defaults to None if missing)
         recap_text = chunk.get('recap')
         
         html_body = format_email_html(book_title, seq, chunk['content'], unsub_token, recap_text)
 
         # --- DEBUG MODE ---
         if debug:
-            print(f"\n[DEBUG] To: {email}")
+            print(f"\n[DEBUG] To: {email} (Timezone: {user_tz_str})")
             print(f"[DEBUG] Subject: {subject}")
             print("-" * 40)
-            print(html_body + "...") # Print first 500 chars to save space
+            print(html_body[:200] + "...") 
             print("-" * 40)
-            print("[DEBUG] Stopping after first email. No emails sent. DB not updated.")
+            print("[DEBUG] Stopping after first email.")
             return
 
-        # 4. Send
-        print(f"   -> Sending Part {seq} of {book_title} to {email}...")
+        # 5. Send
+        print(f"   -> Sending Part {seq} to {email}...")
         success = send_via_sendgrid(email, subject, html_body)
         
-        # 5. Update DB
+        # 6. Update DB
         if success:
             db.subscriptions.update_one(
                 {"_id": sub['_id']},
                 {
                     "$inc": {"current_sequence": 1},
-                    "$set": {"last_sent": datetime.now()}
+                    "$set": {"last_sent": datetime.now()} # Saves as UTC by default
                 }
             )
             count += 1
         else:
-            print("   -> Failed to send. Will retry next run.")
+            print("   -> Failed to send.")
 
-    print(f"\n--- RUN COMPLETE. Sent {count} emails. ---")
+    if count > 0:
+        print(f"\n--- RUN COMPLETE. Sent {count} emails. ---")
 
 if __name__ == "__main__":
-    # Add CLI Argument Parsing
     parser = argparse.ArgumentParser(description="Dispatch DailyLitBits emails")
-    parser.add_argument("--debug", action="store_true", help="Print the first email to console without sending")
+    parser.add_argument("--debug", action="store_true", help="Print email without sending")
+    parser.add_argument("--force", action="store_true", help="Ignore time check (send immediately)")
     args = parser.parse_args()
 
-    send_daily_emails(debug=args.debug)
+    send_daily_emails(debug=args.debug, force=args.force)

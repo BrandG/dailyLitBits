@@ -11,7 +11,7 @@
             padding: 40px 20px; 
             line-height: 1.6; 
             color: #333; 
-            background-color: #fcfbf9; /* Warm paper color */
+            background-color: #fcfbf9;
         }
         h1 { 
             border-bottom: 3px solid #2c3e50; 
@@ -32,7 +32,7 @@
             font-size: 16px; 
             border: 1px solid #ccc; 
             border-radius: 4px; 
-            box-sizing: border-box; /* Fixes padding width issues */
+            box-sizing: border-box; 
         }
         button { 
             background: #2c3e50; 
@@ -87,11 +87,27 @@
             </select>
         </div>
 
+        <!-- HIDDEN TIMEZONE FIELD -->
+        <input type="hidden" name="timezone" id="timezone" value="UTC">
+
         <button type="submit">Start Reading</button>
     </form>
 
     <div class="footer">
         &copy; 2025 DailyLitBits. No spam, just stories.
     </div>
+
+    <!-- AUTO-DETECT TIMEZONE SCRIPT -->
+    <script>
+        try {
+            const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+            if (tz) {
+                document.getElementById('timezone').value = tz;
+                console.log("Detected timezone:", tz);
+            }
+        } catch (e) {
+            console.error("Timezone detection failed, defaulting to UTC.");
+        }
+    </script>
 </body>
 </html>

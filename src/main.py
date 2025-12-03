@@ -30,13 +30,19 @@ async def read_root(request: Request):
 async def handle_signup(
     request: Request, 
     email: str = Form(...), 
-    book_id: str = Form(...)
+    book_id: str = Form(...),
+    timezone: str = Form("UTC") # Default to UTC if JS fails
 ):
     db = get_db()
+    
+    # 1. Create User with Timezone
     manager = UserManager(db)
-    manager.create_user(email)
+    manager.create_user(email, timezone=timezone)
+    
+    # 2. Subscribe User
     subscribe_user(email, book_id)
     
+    # 3. Reload page with success message
     books = list(db.books.find({}, {"book_id": 1, "title": 1, "_id": 0}))
     book_info = db.books.find_one({"book_id": book_id})
     book_title = book_info['title'] if book_info else book_id
@@ -44,33 +50,28 @@ async def handle_signup(
     return templates.TemplateResponse("index.html", {
         "request": request, 
         "books": books,
-        "message": f"Success! You will start receiving '{book_title}' tomorrow."
+        "message": f"Success! You will start receiving '{book_title}' tomorrow at 6:00 AM ({timezone})."
     })
 
 @app.get("/unsubscribe", response_class=HTMLResponse)
 async def unsubscribe(request: Request, token: str):
     db = get_db()
     
-    # 1. Verify the Token
     sub_id_str = verify_unsub_token(token)
     
     if not sub_id_str:
         return HTMLResponse(content="<h1>Invalid or Expired Link</h1>", status_code=400)
 
-    # 2. Update the Database
-    # We set status to 'unsubscribed' so dispatch.py will ignore it
     result = db.subscriptions.update_one(
         {"_id": ObjectId(sub_id_str)}, 
         {"$set": {"status": "unsubscribed"}}
     )
 
     if result.modified_count == 0:
-        # It might already be unsubscribed, or ID not found
         msg = "Subscription not found or already unsubscribed."
     else:
         msg = "You have been successfully unsubscribed."
 
-    # 3. Show simple confirmation page
     html_content = f"""
     <html>
     <body style="font-family: sans-serif; text-align: center; padding-top: 50px;">
