@@ -17,3 +17,5 @@ ENCRYPTION_KEY = key.encode() # Convert string back to bytes
 # Email
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
 FROM_EMAIL = os.getenv("FROM_EMAIL")
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")

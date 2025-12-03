@@ -2,12 +2,54 @@ import requests
 import re
 import argparse
 import sys
+import time
 from pymongo import MongoClient
+import google.generativeai as genai
 import config
 
 # Setup Mongo Connection using Config
 client = MongoClient(config.MONGO_URI)
 db = client[config.DB_NAME]
+
+# Configure Gemini
+if config.GEMINI_API_KEY:
+    genai.configure(api_key=config.GEMINI_API_KEY)
+    # Try using the specific versioned name for Flash, or fallback to Pro
+    try:
+        model = genai.GenerativeModel('gemini-2.0-flash')
+    except:
+        model = genai.GenerativeModel('gemini-2.0-flash-lite')
+else:
+    print("Warning: GEMINI_API_KEY not found. Summaries will be skipped.")
+    model = None
+
+def get_ai_summary(text):
+    """
+    Asks Gemini to summarize the provided text in one sentence.
+    """
+    if not model:
+        return None
+
+    try:
+        # We give it a persona to ensure consistent tone
+        prompt = f"Summarize the following narrative text in exactly one paragraph, written in the style of a 'Previously on...' TV recap. Keep it under 5 sentences:\n\n{text}"
+
+        response = model.generate_content(prompt)
+        return response.text.strip()
+    except Exception as e:
+        # If the primary model fails (e.g. 404), try falling back to 'gemini-pro' just for this call if it wasn't the default
+        if "404" in str(e) and "flash" in model.model_name:
+             print("   [AI Warning]: Flash model failed, retrying with gemini-pro...")
+             try:
+                 fallback_model = genai.GenerativeModel('gemini-pro')
+                 response = fallback_model.generate_content(prompt)
+                 return response.text.strip()
+             except Exception as e2:
+                 print(f"   [AI Error]: Fallback also failed: {e2}")
+                 return None
+
+        print(f"   [AI Error]: {e}")
+        return None
 
 def get_gutenberg_text(url):
     try:
@@ -58,9 +100,7 @@ def extract_title(text):
     """
     # Regex looks for "Title: [Something]" at the start of a line
     match = re.search(r'^Title:\s+(.+)$', text, re.MULTILINE)
-    if match:
-        return match.group(1).strip()
-    return "Unknown Title"
+    return match.group(1).strip() if match else "Unknown Title"
 
 def clean_text(text):
     start_markers = [
@@ -93,21 +133,27 @@ def clean_text(text):
 def chunk_text(text, title, book_id, source_url):
     # Check for duplicates
     if db.books.find_one({"book_id": book_id}):
-        print(f"Error: Book ID '{book_id}' already exists in the library.")
-        return
+        print(f"Book '{book_id}' exists. Deleting old version to re-ingest with summaries...")
+        db.books.delete_one({"book_id": book_id})
+        db.chunks.delete_many({"book_id": book_id})
 
     # Normalize Line Endings
     text = text.replace('\r\n', '\n').replace('\r', '\n')
 
     paragraphs = text.split('\n\n')
-    chunks = []
+
+    chunks_collection = db['chunks']
+    print(f"Processing '{title}' (ID: {book_id})...")
+
+    #Chunking State
     current_chunk = []
     current_word_count = 0
     sequence = 1
     
-    print(f"Processing '{title}' (ID: {book_id})...")
+    #AI state
+    previous_chunk_text = None
 
-    chunks_collection = db['chunks']
+#    chunks = []
 
     for para in paragraphs:
         clean_para = para.strip()
@@ -119,14 +165,29 @@ def chunk_text(text, title, book_id, source_url):
         if current_word_count + word_count > 1000 and current_chunk:
             chunk_content = "\n\n".join(current_chunk)
             
+            # 1. Generate Recap (Summarizing the PREVIOUS chunk for THIS chunk)
+            # Actually, the user wants "Previously on..."
+            # So for Chunk N, we need a summary of Chunk N-1.
+
+            if sequence == 1:
+                recap = "You are beginning the book."
+            else:
+                print(f"   Generating summary for Chunk {sequence} (based on Chunk {sequence-1})...")
+                # We summarize the chunk we just finished processing in the LAST loop
+                recap = get_ai_summary(previous_chunk_text)
+                # Sleep to respect rate limits (15 RPM = 4 seconds delay)
+                time.sleep(4.1)
+
             chunk_doc = {
                 "book_id": book_id,
                 "sequence": sequence,
                 "content": chunk_content,
-                "word_count": current_word_count
+                "word_count": current_word_count,
+                "recap": recap,
             }
             chunks_collection.insert_one(chunk_doc)
             
+            previous_chunk_text = chunk_content
             sequence += 1
             current_chunk = []
             current_word_count = 0
@@ -135,11 +196,20 @@ def chunk_text(text, title, book_id, source_url):
         current_word_count += word_count
 
     if current_chunk:
+        chunk_content = "\n\n".join(current_chunk)
+        # Summarize the penultimate chunk for this final chunk
+        if sequence > 1:
+            print(f"   Generating summary for Final Chunk {sequence}...")
+            recap = get_ai_summary(previous_chunk_text)
+        else:
+            recap = "You are beginning the book."
+
         chunk_doc = {
             "book_id": book_id,
             "sequence": sequence,
             "content": "\n\n".join(current_chunk),
-            "word_count": current_word_count
+            "word_count": current_word_count,
+            "recap": recap,
         }
         chunks_collection.insert_one(chunk_doc)
 
@@ -157,11 +227,8 @@ if __name__ == "__main__":
     
     # The 'source' can now be an ID OR a URL
     parser.add_argument("source", help="Gutenberg ID (e.g. 84) OR full URL")
-    
-    # Title and ID are now optional overrides
     parser.add_argument("--title", "-t", help="Override Book Title (defaults to auto-detect)")
     parser.add_argument("--id", "-i", help="Override Book ID (defaults to auto-detect)")
-
     args = parser.parse_args()
 
     try:

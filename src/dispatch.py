@@ -1,27 +1,38 @@
+import argparse
 from pymongo import MongoClient
 from cryptography.fernet import Fernet
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail
 from datetime import datetime
 import config
-import security  # Import the new security module
+import security
 
 # Setup using Config
 client = MongoClient(config.MONGO_URI)
 db = client[config.DB_NAME]
 cipher = Fernet(config.ENCRYPTION_KEY)
 
-def format_email_html(title, sequence, content, unsub_token):
+def format_email_html(title, sequence, content, unsub_token, recap=None):
     """
-    Wraps the raw text in a simple, book-like HTML template with an unsubscribe link.
+    Wraps the raw text in a simple, book-like HTML template.
+    Includes an optional 'Previously on...' recap section.
     """
     # Convert plain text newlines to HTML breaks
     html_content = content.replace('\n\n', '</p><p>').replace('\n', '<br>')
     
     # Build Unsubscribe URL
-    # In production, this should use your real domain from config or hardcoded
-    base_url = "https://dailylitbits.com" 
+    base_url = "https://dailylitbits.com"
     unsub_link = f"{base_url}/unsubscribe?token={unsub_token}"
+
+    # Build Recap Block (if it exists)
+    recap_html = ""
+    if recap and sequence > 1:
+        recap_html = f"""
+        <div style="background-color: #f8f9fa; border-left: 4px solid #6c757d; padding: 15px; margin-bottom: 25px; color: #555; font-style: italic; font-size: 14px;">
+            <strong style="color: #333; font-style: normal; display: block; margin-bottom: 5px;">Previously:</strong>
+            {recap}
+        </div>
+        """
 
     template = f"""
     <html>
@@ -29,6 +40,9 @@ def format_email_html(title, sequence, content, unsub_token):
         <h2 style="color: #2c3e50; border-bottom: 2px solid #eee; padding-bottom: 10px;">
             {title}
         </h2>
+        
+        {recap_html}
+        
         <div style="font-size: 18px;">
             <p>{html_content}</p>
         </div>
@@ -57,9 +71,16 @@ def send_via_sendgrid(to_email, subject, html_body):
         print(f"   [ERROR] SendGrid failed: {e}")
         return False
 
-def send_daily_emails():
-    print(f"--- STARTING DISPATCH RUN: {datetime.now()} ---")
+def send_daily_emails(debug=False):
+    print(f"--- STARTING DISPATCH RUN: {datetime.now()} (Debug={debug}) ---")
     
+    # Count them first for debugging visibility
+    total_active = db.subscriptions.count_documents({"status": "active"})
+    print(f"Found {total_active} active subscriptions.")
+
+    if total_active == 0:
+        print("   [WARNING] No active subscriptions found. Did you sign up or finish the book?")
+
     active_subs = db.subscriptions.find({"status": "active"})
     count = 0
     
@@ -67,24 +88,26 @@ def send_daily_emails():
         user_id = sub['user_id']
         book_id = sub['book_id']
         seq = sub['current_sequence']
-        sub_id = sub['_id'] # Needed for unsubscribe token
+        sub_id = sub['_id']
+
+        print(f"Processing Sub {sub_id} (User: {user_id} | Book: {book_id} | Seq: {seq})...")
         
         # 1. Decrypt Email
         user = db.users.find_one({"_id": user_id})
-        if not user: continue
+        if not user: 
+            print(f"   [ERROR] User {user_id} not found in 'users' collection. Skipping.")
+            continue
             
         try:
             email = cipher.decrypt(user['email_enc']).decode()
         except Exception:
-            print(f"Skipping {user_id}: Decryption failed.")
+            print(f"   [ERROR] Skipping {user_id}: Decryption failed.")
             continue
 
         # 2. Get Content
         chunk = db.chunks.find_one({"book_id": book_id, "sequence": seq})
         if not chunk:
-            print(f"User {email} finished {book_id}!")
-            # Logic to mark complete goes here
-            # Mark subscription as completed
+            print(f"   [INFO] Chunk {seq} missing. Marking {book_id} as finished for {email}!")
             db.subscriptions.update_one(
                 {"_id": sub_id},
                 {"$set": {"status": "completed", "completed_at": datetime.now()}}
@@ -96,13 +119,25 @@ def send_daily_emails():
         book_title = book['title'] if book else "Your Book"
         subject = f"{book_title}: Part {seq}"
         
-        # Generate the Unsubscribe Token
         unsub_token = security.generate_unsub_token(sub_id)
         
-        html_body = format_email_html(book_title, seq, chunk['content'], unsub_token)
+        # Grab the recap from the chunk (defaults to None if missing)
+        recap_text = chunk.get('recap')
+        
+        html_body = format_email_html(book_title, seq, chunk['content'], unsub_token, recap_text)
+
+        # --- DEBUG MODE ---
+        if debug:
+            print(f"\n[DEBUG] To: {email}")
+            print(f"[DEBUG] Subject: {subject}")
+            print("-" * 40)
+            print(html_body + "...") # Print first 500 chars to save space
+            print("-" * 40)
+            print("[DEBUG] Stopping after first email. No emails sent. DB not updated.")
+            return
 
         # 4. Send
-        print(f"-> Sending Part {seq} of {book_title} to {email}...")
+        print(f"   -> Sending Part {seq} of {book_title} to {email}...")
         success = send_via_sendgrid(email, subject, html_body)
         
         # 5. Update DB
@@ -121,4 +156,9 @@ def send_daily_emails():
     print(f"\n--- RUN COMPLETE. Sent {count} emails. ---")
 
 if __name__ == "__main__":
-    send_daily_emails()
+    # Add CLI Argument Parsing
+    parser = argparse.ArgumentParser(description="Dispatch DailyLitBits emails")
+    parser.add_argument("--debug", action="store_true", help="Print the first email to console without sending")
+    args = parser.parse_args()
+
+    send_daily_emails(debug=args.debug)
