@@ -1,31 +1,33 @@
 from itsdangerous import URLSafeSerializer
 import config
 
-def get_serializer():
+def get_serializer(salt='unsubscribe'):
     """
-    Creates a serializer using the secret key from your config.
+    Creates a serializer.
+    salt: separating 'unsubscribe' tokens from 'binge' tokens.
     """
-    # specific 'salt' separates these tokens from others (like login tokens)
-    return URLSafeSerializer(config.ENCRYPTION_KEY, salt='unsubscribe')
+    return URLSafeSerializer(config.ENCRYPTION_KEY, salt=salt)
 
+# --- UNSUBSCRIBE ---
 def generate_unsub_token(subscription_id):
-    """
-    Generates a signed token for a specific subscription ID.
-    input: subscription_id (str or ObjectId)
-    output: str
-    """
-    s = get_serializer()
+    s = get_serializer(salt='unsubscribe')
     return s.dumps(str(subscription_id))
 
 def verify_unsub_token(token):
-    """
-    Verifies the token and returns the subscription ID.
-    Returns None if token is invalid or tampered with.
-    """
-    s = get_serializer()
+    s = get_serializer(salt='unsubscribe')
     try:
-        # We don't need an expiration time for unsubs (links should work forever)
-        sub_id = s.loads(token)
-        return sub_id
+        return s.loads(token)
+    except Exception:
+        return None
+
+# --- BINGEWATCH (NEW) ---
+def generate_binge_token(subscription_id):
+    s = get_serializer(salt='binge')
+    return s.dumps(str(subscription_id))
+
+def verify_binge_token(token):
+    s = get_serializer(salt='binge')
+    try:
+        return s.loads(token)
     except Exception:
         return None

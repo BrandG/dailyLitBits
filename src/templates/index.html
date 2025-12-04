@@ -81,9 +81,11 @@
         <div class="form-group">
             <label for="book">Choose a Book</label>
             <select name="book_id" id="book">
-                {% for book in books %}
-                <option value="{{ book.book_id }}">{{ book.title }}</option>
-                {% endfor %}
+	    	{% for book in books %}
+		<option value="{{ book.book_id }}">
+		    {{ book.title }} by {{ book.author }}
+		</option>
+		{% endfor %}
             </select>
         </div>
 

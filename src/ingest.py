@@ -15,7 +15,7 @@ def get_gutenberg_text(url):
     try:
         response = requests.get(url)
         response.raise_for_status()
-        response.encoding = 'utf-8-sig'
+        response.encoding = response.apparent_encoding
         return response.text
     except Exception as e:
         print(f"Error fetching URL: {e}")
@@ -40,25 +40,49 @@ def extract_title(text):
     match = re.search(r'^Title:\s+(.+)$', text, re.MULTILINE)
     return match.group(1).strip() if match else "Unknown Title"
 
-def clean_text(text):
-    start_markers = [r"\*\*\* START OF .* \*\*\*", r"START OF THE PROJECT GUTENBERG EBOOK"]
-    end_markers = [r"\*\*\* END OF .* \*\*\*", r"End of the Project Gutenberg EBook"]
-    
-    start_pos = 0
-    for marker in start_markers:
-        match = re.search(marker, text, re.IGNORECASE)
-        if match:
-            start_pos = match.end(); break
-            
-    end_pos = len(text)
-    for marker in end_markers:
-        match = re.search(marker, text, re.IGNORECASE)
-        if match:
-            end_pos = match.start(); break
-            
-    return text[start_pos:end_pos].strip()
+# --- NEW FUNCTION ---
+def extract_author(text):
+    # Regex to find "Author: [Name]"
+    match = re.search(r'^Author:\s+(.+)$', text, re.MULTILINE)
+    return match.group(1).strip() if match else "Unknown Author"
 
-def chunk_text(text, title, book_id, source_url):
+def clean_text(text):
+    start_markers = [
+        r"\*\*\* ?START OF (THE|THIS) PROJECT GUTENBERG.*",
+        r"START OF THE PROJECT GUTENBERG",
+        r"start of the project gutenberg",
+    ]
+    end_markers = [
+        r"\*\*\* ?END OF (THE|THIS) PROJECT GUTENBERG.*",
+        r"End of (The )?Project Gutenberg",
+        r"End of the project gutenberg",
+    ]
+
+    lines = text.splitlines()
+    start_idx = 0
+    end_idx = len(lines)
+
+    # Scan for start
+    for i, line in enumerate(lines[:300]): # Only check first 300 lines
+        for marker in start_markers:
+            if re.search(marker, line, re.IGNORECASE):
+                start_idx = i + 1
+                break
+        if start_idx > 0: break
+
+    # Scan for end (reverse)
+    for i, line in enumerate(lines[::-1][:300]): # Only check last 300 lines
+        for marker in end_markers:
+            if re.search(marker, line, re.IGNORECASE):
+                end_idx = len(lines) - i - 1
+                break
+        if end_idx < len(lines): break
+
+    # Rejoin and return
+    return "\n".join(lines[start_idx:end_idx]).strip()
+
+# --- UPDATED ARGUMENTS ---
+def chunk_text(text, title, author, book_id, source_url):
     # Check if book exists
     if db.books.find_one({"book_id": book_id}):
         print(f"Book '{book_id}' exists. Deleting old version to re-ingest...")
@@ -68,8 +92,7 @@ def chunk_text(text, title, book_id, source_url):
     text = text.replace('\r\n', '\n').replace('\r', '\n')
     paragraphs = text.split('\n\n')
     
-    chunks_collection = db['chunks']
-    print(f"Processing '{title}' (ID: {book_id})...")
+    print(f"Processing '{title}' by {author} (ID: {book_id})...")
 
     memory_chunks = []
     current_chunk = []
@@ -85,7 +108,6 @@ def chunk_text(text, title, book_id, source_url):
         if current_word_count + word_count > 1000 and current_chunk:
             chunk_content = "\n\n".join(current_chunk)
             
-            # Note: recap is None for now. The summarize.py worker will fill it later.
             memory_chunks.append({
                 "book_id": book_id,
                 "sequence": sequence,
@@ -115,15 +137,17 @@ def chunk_text(text, title, book_id, source_url):
     if memory_chunks:
         db.chunks.insert_many(memory_chunks)
 
+    # Insert with Author field
     db.books.insert_one({
         "book_id": book_id,
         "title": title,
+        "author": author,  # <--- NEW FIELD
         "total_chunks": sequence,
         "source_url": source_url
     })
     print(f"Success! '{title}' ingested. ({sequence} chunks). Ready for AI processing.")
 
-def process_source(source, override_title=None, override_id=None):
+def process_source(source, override_title=None, override_author=None, override_id=None):
     try:
         url, derived_id = derive_metadata(source)
         book_id = override_id if override_id else derived_id
@@ -138,8 +162,10 @@ def process_source(source, override_title=None, override_id=None):
             return
 
         title = override_title if override_title else extract_title(raw_text)
+        author = override_author if override_author else extract_author(raw_text) # <--- Extract Author
+        
         clean_content = clean_text(raw_text)
-        chunk_text(clean_content, title, book_id, url)
+        chunk_text(clean_content, title, author, book_id, url)
     except Exception as e:
         print(f"Error processing '{source}': {e}")
 
@@ -147,6 +173,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Ingest books into DailyLitBits (Fast Mode - No AI)")
     parser.add_argument("source", help="Gutenberg ID, URL, or path to .txt file list")
     parser.add_argument("--title", "-t", help="Override Title (Single mode only)")
+    parser.add_argument("--author", "-a", help="Override Author (Single mode only)") # <--- Add Argument
     parser.add_argument("--id", "-i", help="Override ID (Single mode only)")
     args = parser.parse_args()
 
@@ -158,8 +185,7 @@ if __name__ == "__main__":
                 line = line.strip()
                 if line and not line.startswith("#"):
                     process_source(line)
-                    # Tiny sleep just to be polite to Gutenberg servers
                     time.sleep(0.5) 
     else:
         # SINGLE MODE
-        process_source(args.source, args.title, args.id)
+        process_source(args.source, args.title, args.author, args.id)
