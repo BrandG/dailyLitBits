@@ -30,3 +30,6 @@ Werkzeug==3.1.4
 itsdangerous
 google-generativeai
 pytz
+passlib
+argon2-cffi
+beautifulsoup4

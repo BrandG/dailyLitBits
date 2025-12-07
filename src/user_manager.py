@@ -1,66 +1,92 @@
-import argparse
-import hashlib
+import pytz
 from datetime import datetime
-from pymongo import MongoClient
 from cryptography.fernet import Fernet
+from passlib.context import CryptContext # <--- NEW
 import config
+
+# Setup Password Hashing (Bcrypt)
+pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")
 
 class UserManager:
     def __init__(self, db):
-        self.users = db['users']
+        self.db = db
         self.cipher = Fernet(config.ENCRYPTION_KEY)
 
-    def _hash_email(self, email):
-        clean_email = email.lower().strip().encode()
-        return hashlib.sha256(clean_email).hexdigest()
-
-    def _encrypt_email(self, email):
-        return self.cipher.encrypt(email.encode())
+    def encrypt_email(self, email):
+        return self.cipher.encrypt(email.lower().encode())
 
     def create_user(self, email, timezone="UTC"):
-        user_id = self._hash_email(email)
+        """
+        Creates a 'Ghost' user (no password, no username yet).
+        """
+        # Check if email exists (by searching all users - inefficient but fine for now)
+        # Ideally, we'd hash emails for lookup, but for now we iterate or catch duplicates
+        # optimizing this is a future task.
         
-        # Check if user already exists
-        existing_user = self.users.find_one({"_id": user_id})
-        
-        if existing_user:
-            print(f"User already exists: {user_id}")
-            
-            # Logic: If the user exists but has a different timezone, update it.
-            # This allows users to 'fix' their timezone by just signing up again.
-            current_tz = existing_user.get('timezone')
-            if current_tz != timezone:
-                self.users.update_one(
-                    {"_id": user_id},
-                    {"$set": {"timezone": timezone}}
-                )
-                print(f"   -> Updated timezone from {current_tz} to {timezone}")
-            
-            return user_id
-
-        # Create new user
-        user_doc = {
-            "_id": user_id,
-            "email_enc": self._encrypt_email(email),
+        user = {
+            "email_enc": self.encrypt_email(email),
             "timezone": timezone,
-            "created_at": datetime.utcnow()
+            "created_at": datetime.now(),
+            "username": None,      # <--- NEW
+            "password_hash": None, # <--- NEW
+            "is_claimed": False,   # <--- NEW
+            "role": "reader"
         }
         
-        self.users.insert_one(user_doc)
-        print(f"User created with ID: {user_id} (TZ: {timezone})")
-        return user_id
+        result = self.db.users.insert_one(user)
+        return result.inserted_id
 
-if __name__ == "__main__":
-    # CLI Argument Parsing
-    parser = argparse.ArgumentParser(description="Manage DailyLitBits Users")
-    parser.add_argument("email", help="The user's email address")
-    parser.add_argument("--timezone", default="UTC", help="User's timezone (e.g. America/New_York)")
-    
-    args = parser.parse_args()
-    
-    # Setup DB
-    client = MongoClient(config.MONGO_URI)
-    db = client[config.DB_NAME]
-    
-    manager = UserManager(db)
-    manager.create_user(args.email, args.timezone)
+    # --- NEW AUTHENTICATION METHODS ---
+
+    def claim_account(self, user_id, username, password):
+        """
+        Upgrades a Ghost user to a Claimed user.
+        """
+        # 1. Hash the password
+        hashed_pw = pwd_context.hash(password)
+
+        # 2. Update DB
+        try:
+            # First, check if username is taken manually (clearer debugging)
+            existing = self.db.users.find_one({"username": username})
+            if existing and existing['_id'] != user_id:
+                print(f"[ERROR] Username '{username}' is already taken by {existing['_id']}")
+                return False, "Username already taken."
+
+            result = self.db.users.update_one(
+                {"_id": user_id},
+                {
+                    "$set": {
+                        "username": username,
+                        "password_hash": hashed_pw,
+                        "is_claimed": True
+                    }
+                }
+            )
+            print(f"[DEBUG] Update Result: Matched={result.matched_count}, Modified={result.modified_count}")
+
+            if result.matched_count == 0:
+                return False, "User ID not found in database."
+
+            return True, "Account claimed successfully."
+
+        except Exception as e:
+            # PRINT THE REAL ERROR
+            print(f"[CRITICAL ERROR] Claim failed: {e}")
+            return False, f"System Error: {e}"
+
+    def verify_user(self, username, password):
+        """
+        Verifies login credentials. Returns user_id if valid, None if not.
+        """
+        user = self.db.users.find_one({"username": username})
+        if not user:
+            return None
+        
+        if not user.get('password_hash'):
+            return None
+            
+        if pwd_context.verify(password, user['password_hash']):
+            return user['_id']
+        
+        return None

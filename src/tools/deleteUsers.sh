@@ -1,0 +1,1 @@
+docker exec dailylitbits python -c "from pymongo import MongoClient; import config; db = MongoClient(config.MONGO_URI)[config.DB_NAME]; db.users.delete_many({}); db.subscriptions.delete_many({}); print('--- Database Wiped ---')"

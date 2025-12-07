@@ -1,126 +1,114 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>DailyLitBits</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DailyLitBits - Slow Reading</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <style>
-        body { 
-            font-family: Georgia, 'Times New Roman', serif; 
-            max-width: 600px; 
-            margin: 0 auto; 
-            padding: 40px 20px; 
-            line-height: 1.6; 
-            color: #333; 
-            background-color: #fcfbf9;
+        body {
+            /* Subtle texture or color for better reading experience */
+            background-color: #f8f9fa; 
         }
-        h1 { 
-            border-bottom: 3px solid #2c3e50; 
-            padding-bottom: 15px; 
-            color: #2c3e50;
-            margin-top: 0;
-        }
-        .tagline {
-            font-style: italic;
-            color: #666;
-            margin-bottom: 30px;
-        }
-        .form-group { margin-bottom: 20px; }
-        label { display: block; margin-bottom: 8px; font-weight: bold; color: #555; }
-        input[type="email"], select { 
-            width: 100%; 
-            padding: 12px; 
-            font-size: 16px; 
-            border: 1px solid #ccc; 
-            border-radius: 4px; 
-            box-sizing: border-box; 
-        }
-        button { 
-            background: #2c3e50; 
-            color: white; 
-            padding: 12px 24px; 
-            border: none; 
-            border-radius: 4px;
-            font-size: 18px; 
-            cursor: pointer; 
-            width: 100%;
-            transition: background 0.2s;
-        }
-        button:hover { background: #34495e; }
-        .flash { 
-            padding: 15px; 
-            background: #e8f5e9; 
-            border: 1px solid #c8e6c9; 
-            color: #2e7d32; 
-            margin-bottom: 25px; 
-            border-radius: 4px;
-        }
-        .footer {
-            margin-top: 50px;
-            font-size: 12px;
-            text-align: center;
-            color: #999;
-            border-top: 1px solid #eee;
-            padding-top: 20px;
+        .hero-text {
+            font-family: Georgia, 'Times New Roman', serif;
         }
     </style>
 </head>
-<body>
-    <h1>DailyLitBits</h1>
-    <div class="tagline">Read the classics, one bite at a time. Delivered daily.</div>
-
-    {% if message %}
-    <div class="flash">{{ message }}</div>
-    {% endif %}
-
-    <form action="/signup" method="post">
-        <div class="form-group">
-            <label for="email">Email Address</label>
-            <input type="email" id="email" name="email" required placeholder="you@example.com">
+<body class="bg-light">
+    
+    <nav class="navbar navbar-expand-lg navbar-light bg-white shadow-sm mb-5">
+        <div class="container">
+            <a class="navbar-brand fw-bold text-success fs-3" href="/">DailyLitBits</a>
+            
+            <div class="ms-auto">
+                <a href="/login" class="btn btn-outline-success btn-sm px-4">Log In</a>
+            </div>
         </div>
-        
-        <div class="form-group">
-            <label for="book">Choose a Book</label>
-            <select name="book_id" id="book">
-	    	{% for book in books %}
-		<option value="{{ book.book_id }}">
-		    {{ book.title }} by {{ book.author }}
-		</option>
-		{% endfor %}
-            </select>
+    </nav>
+
+    <div class="container">
+        <div class="row justify-content-center">
+            <div class="col-md-6 col-lg-5">
+                
+                <div class="text-center mb-5 hero-text">
+                    <h2 class="text-dark mb-2">Read the classics.</h2>
+                    <p class="lead text-muted">
+                        One bite at a time. Delivered daily.
+                    </p>
+                </div>
+
+                <div class="card shadow-sm border-0">
+                    <div class="card-body p-4">
+                        
+                        {% if message %}
+                        <div class="alert alert-success text-center" role="alert">
+                            {{ message }}
+                        </div>
+                        {% endif %}
+
+                        <form action="/signup" method="post">
+                            <div class="mb-3">
+                                <label for="email" class="form-label fw-bold">Email Address</label>
+                                <input type="email" class="form-control" id="email" name="email" placeholder="you@example.com" required>
+                            </div>
+
+                            <div class="mb-4">
+                                <label for="book_id" class="form-label fw-bold">Choose a Book</label>
+                                <select class="form-select" id="book_id" name="book_id">
+                                    {% for book in books %}
+                                    <option value="{{ book.book_id }}">
+                                        {{ book.title }} by {{ book.author }}
+                                    </option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+                            
+                            <input type="hidden" id="timezone" name="timezone" value="UTC">
+
+                            <div class="d-grid">
+                                <button type="submit" class="btn btn-dark btn-lg">Start Reading</button>
+                            </div>
+                        </form>
+                        
+                        <div class="mt-4 p-3 bg-light rounded border" style="font-size: 0.85rem; color: #555;">
+                            <div class="d-flex align-items-center justify-content-center gap-2 mb-1">
+                                <span>🔒</span>
+                                <strong style="color: #2c3e50;">Our Privacy Promise</strong>
+                            </div>
+                            <p class="m-0 text-center" style="line-height: 1.4;">
+                                We will <strong>never</strong> sell, rent, or distribute your email address.
+                                We encrypt it on our servers and store nothing in plaintext.
+                                Your data exists solely to deliver your books.
+                                We will wipe the database before we share your data.
+                            </p>
+                        </div>
+                        
+                        <div class="mt-3 text-center" style="font-size: 0.9rem;">
+                            <span class="text-muted">Don't see your favorite book?</span><br>
+                            <a href="/suggest" class="text-decoration-none fw-bold text-success">Suggest a Title</a>
+                        </div>
+
+                    </div>
+                </div>
+                
+                <div class="text-center mt-5 text-muted small">
+                    &copy; {{ now_year }} DailyLitBits
+                </div>
+
+            </div>
         </div>
-
-        <!-- HIDDEN TIMEZONE FIELD -->
-        <input type="hidden" name="timezone" id="timezone" value="UTC">
-
-        <button type="submit">Start Reading</button>
-	<div style="margin-top: 15px; font-size: 0.85rem; color: #555; background-color: #f8f9fa; padding: 10px; border-radius: 4px; border: 1px solid #e9ecef;">
-	    <div style="display: flex; align-items: center; justify-content: center; gap: 8px; margin-bottom: 4px;">
-	        <span>🔒</span>
-       		 <strong style="color: #2c3e50;">Our Privacy Promise</strong>
-	    </div>
-	    <p style="margin: 0; line-height: 1.4;text-align:center">
-	    We will <strong>never</strong> sell, rent, or distribute your email address.<br>
-	    In order to perform this service, we need an e-mail address, but we encrypt it on our servers, and store nothing in plaintext.<br>
-	    Your data exists solely to deliver your books.<br>
-        We will wipe the database before we share your data.
-	    </p>
-	</div>
-    </form>
-
-    <div class="footer">
-        &copy; 2025 DailyLitBits. No spam, just stories.
     </div>
 
-    <!-- AUTO-DETECT TIMEZONE SCRIPT -->
     <script>
+        // Automatically detect user's timezone
         try {
             const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
             if (tz) {
                 document.getElementById('timezone').value = tz;
-                console.log("Detected timezone:", tz);
             }
         } catch (e) {
-            console.error("Timezone detection failed, defaulting to UTC.");
+            console.log("Timezone detection failed, defaulting to UTC");
         }
     </script>
 </body>

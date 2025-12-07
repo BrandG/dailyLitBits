@@ -9,6 +9,7 @@ import config
 import security
 from bson import ObjectId
 import random
+import ai
 
 # --- CONFIGURATION ---
 TARGET_HOUR = 6
@@ -18,11 +19,20 @@ client = MongoClient(config.MONGO_URI)
 db = client[config.DB_NAME]
 cipher = Fernet(config.ENCRYPTION_KEY)
 
-def format_email_html(title, sequence, content, unsub_token, binge_token, recap=None):
+def format_email_html(title, sequence, total_chunks, content, unsub_token, binge_token, recap=None):
     html_content = content.replace('\n\n', '</p><p>').replace('\n', '<br>')
     base_url = "https://dailylitbits.com"
     unsub_link = f"{base_url}/unsubscribe?token={unsub_token}"
     binge_link = f"{base_url}/next?token={binge_token}"
+    dashboard_link = f"{base_url}/profile?token={binge_token}"
+
+    if total_chunks < 1: total_chunks = 1
+    percent = int((sequence / total_chunks) * 100)
+    if percent < 1: percent = 1
+    
+    # Calculate widths for the table cells
+    green_width = percent
+    gray_width = 100 - percent
 
     recap_html = ""
     if recap and sequence > 1:
@@ -45,17 +55,41 @@ def format_email_html(title, sequence, content, unsub_token, binge_token, recap=
     template = f"""
     <html>
     <body style="font-family: Georgia, 'Times New Roman', serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
-        <h2 style="color: #2c3e50; border-bottom: 2px solid #eee; padding-bottom: 10px;">
-            {title}
-        </h2>
+        
+        <div style="border-bottom: 2px solid #eee; padding-bottom: 15px; margin-bottom: 20px;">
+            <h2 style="color: #2c3e50; margin: 0 0 10px 0;">{title}</h2>
+            
+            <table width="100%" cellpadding="0" cellspacing="0" style="margin-top: 10px;">
+                <tr>
+                    <td width="85%" style="vertical-align: middle;">
+                        <table width="100%" cellpadding="0" cellspacing="0" height="8" style="height: 8px; background-color: #eeeeee; border-radius: 4px; overflow: hidden;">
+                            <tr>
+                                <td width="{green_width}%" height="8" style="background-color: #28a745; height: 8px; line-height: 0; font-size: 0;">&nbsp;</td>
+                                <td width="{gray_width}%" height="8" style="background-color: #eeeeee; height: 8px; line-height: 0; font-size: 0;">&nbsp;</td>
+                            </tr>
+                        </table>
+                    </td>
+                    <td width="15%" style="text-align: right; font-family: sans-serif; font-size: 12px; color: #999; white-space: nowrap; padding-left: 10px;">
+                        Part {sequence} of {total_chunks}
+                    </td>
+                </tr>
+            </table>
+        </div>
+
         {recap_html}
+        
         <div style="font-size: 18px;">
             <p>{html_content}</p>
         </div>
+        
         {binge_button_html}
+        
         <hr style="border: 0; border-top: 1px solid #eee; margin-top: 30px;">
-        <p style="font-size: 12px; color: #999; text-align: center;">
-            DailyLitBits - Part {sequence} | <a href="{unsub_link}" style="color: #999;">Unsubscribe</a>
+        
+        <p style="font-size: 12px; color: #999; text-align: center; font-family: sans-serif;">
+            <a href="{dashboard_link}" style="color: #2c3e50; font-weight: bold; text-decoration: none;">Manage Subscription</a> 
+            &nbsp;|&nbsp; 
+            <a href="{unsub_link}" style="color: #999;">Unsubscribe</a>
         </p>
     </body>
     </html>
@@ -219,13 +253,39 @@ def process_subscription(sub_id, trigger="cron", debug=False):
     # Normal Email Logic (Same as before)
     book = db.books.find_one({"book_id": book_id})
     book_title = book['title'] if book else "Your Book"
+    total_chunks = book.get('total_chunks', 100) if book else 100
     subject = f"{book_title}: Part {seq}"
     
     unsub_token = security.generate_unsub_token(sub_id)
     binge_token = security.generate_binge_token(sub_id)
     recap_text = chunk.get('recap')
     
-    html_body = format_email_html(book_title, seq, chunk['content'], unsub_token, binge_token, recap_text)
+    if not recap_text and seq > 1:
+        print(f"   [JIT AI] Recap missing for {book_id} part {seq}. Generating with Rolling Context...")
+        
+        # 1. Fetch the PREVIOUS chunk (We need its recap to provide context)
+        prev_seq = seq - 1
+        prev_chunk = db.chunks.find_one({"book_id": book_id, "sequence": prev_seq})
+        
+        if prev_chunk:
+            # 2. Get the Context (The summary of everything up to prev_chunk)
+            context_summary = prev_chunk.get('recap')
+            
+            # 3. Generate Rolling Summary
+            new_recap = ai.generate_recap(prev_chunk['content'], previous_recap=context_summary)
+            
+            if new_recap:
+                db.chunks.update_one(
+                    {"_id": chunk['_id']}, 
+                    {"$set": {"recap": new_recap}}
+                )
+                recap_text = new_recap
+                print(f"   [JIT AI] Success! Saved rolling recap.")
+            else:
+                print(f"   [JIT AI] Generation failed.")
+    # -------------------------------
+    
+    html_body = format_email_html(book_title, seq, total_chunks, chunk['content'], unsub_token, binge_token, recap_text)
 
     if debug:
         print(f"[DEBUG] Generated email for {email}")
@@ -269,7 +329,7 @@ def send_daily_emails(debug=False, force=False):
         if last_sent:
             if last_sent.tzinfo is None: last_sent = pytz.utc.localize(last_sent)
             last_sent_local = last_sent.astimezone(user_tz)
-            if last_sent_local.date() == user_now.date():
+            if not force and last_sent_local.date() == user_now.date():
                 print(f"   [INFO] Skipping {sub_id}: Already sent today.")
                 continue
 
