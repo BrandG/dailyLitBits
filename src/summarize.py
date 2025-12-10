@@ -3,37 +3,36 @@ from pymongo import MongoClient
 import config
 import ai
 
-# Setup
 client = MongoClient(config.MONGO_URI)
 db = client[config.DB_NAME]
 
 def backfill_recaps():
-    print(f"--- Starting AI Backfill Worker: {time.strftime('%Y-%m-%d %H:%M:%S')} ---")
+    print(f"--- Starting AI Backfill Worker ---")
     
-    # Find chunks that are missing recaps (skip sequence 1)
-    # We limit to 50 to prevent blowing the entire daily quota in one run
+    # REMOVED .limit(50) so it does everything
     query = {"sequence": {"$gt": 1}, "recap": None}
-    to_process = list(db.chunks.find(query).limit(50))
+    # Using a cursor instead of list() prevents loading 72k objects into RAM at once
+    cursor = db.chunks.find(query) 
     
-    print(f"Found {len(to_process)} chunks needing recaps.")
+    print(f"Found {db.chunks.count_documents(query)} chunks needing recaps.")
     
-    for chunk in to_process:
+    count = 0
+    for chunk in cursor:
         book_id = chunk['book_id']
         seq = chunk['sequence']
         
-        # We need to summarize the PREVIOUS chunk (Seq - 1)
         prev_seq = seq - 1
         prev_chunk = db.chunks.find_one({"book_id": book_id, "sequence": prev_seq})
         
         if not prev_chunk:
             continue
             
-        # Get the context (The recap stored on Seq - 1, which summarizes Seq - 2)
         context_summary = prev_chunk.get('recap')
         
-        print(f"Processing {book_id} part {seq} (Context available: {context_summary is not None})...")
+        # Log less frequently to keep terminal clean
+        if count % 100 == 0:
+            print(f"[{count}] Processing {book_id} part {seq}...")
         
-        # Generate
         summary = ai.generate_recap(prev_chunk['content'], previous_recap=context_summary)
         
         if summary:
@@ -41,11 +40,12 @@ def backfill_recaps():
                 {"_id": chunk['_id']},
                 {"$set": {"recap": summary}}
             )
-            print(f"   -> Saved.")
-            time.sleep(2) 
         else:
-            print(f"   -> Failed. Stopping run.")
-            break
+            # CHANGED: Don't stop, just log and move on
+            print(f"   [!] Failed to generate for {book_id} {seq}. Skipping.")
+        
+        count += 1
+        # No sleep needed for Tier 1
 
     print("--- Backfill Run Complete ---")
 

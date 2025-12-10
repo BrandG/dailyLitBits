@@ -16,3 +16,6 @@ env/
 
 # OS Junk
 .DS_Store
+
+# Generated static files
+src/static/covers/

@@ -202,7 +202,7 @@ def process_subscription(sub_id, trigger="cron", debug=False):
     
     # --- VICTORY LOGIC ---
     if not chunk:
-        # Calculate Time
+        # Calculate stats
         start_date = sub.get('created_at', datetime.now())
         if start_date.tzinfo is None: start_date = pytz.utc.localize(start_date)
         now_utc = datetime.now(pytz.utc)
@@ -216,30 +216,88 @@ def process_subscription(sub_id, trigger="cron", debug=False):
         ]
         result = list(db.chunks.aggregate(pipeline))
         total_words = result[0]['total_words'] if result else 0
-        
-        # Get Suggestions (3 random books, excluding current)
-        suggestions = list(db.books.aggregate([
-            {"$match": {"book_id": {"$ne": book_id}}},
-            {"$sample": {"size": 3}},
-            {"$project": {"title": 1, "book_id": 1}}
-        ]))
-        
-        # Reuse the 'binge' token generator for the "Switch Book" token
-        # It's secure enough for this purpose (signed user ID)
-        switch_token = security.generate_binge_token(sub_id)
 
-        book = db.books.find_one({"book_id": book_id})
-        book_title = book['title'] if book else "Your Book"
+        print(f"    [Victory] Generating smart recommendations for {user_id}...")
+        
+        # A. Get User History (Completed books + Current book)
+        completed_subs = list(db.subscriptions.find(
+            {"user_id": user_id, "status": "completed"}
+        ))
+
+        # We use 'parent_id' (e.g., 'pg11') to normalize editions (pg11_short vs pg11)
+        # If 'parent_id' is missing (legacy data), fallback to 'book_id'
+        read_parent_ids = set()
+
+        # Add past books
+        for s in completed_subs:
+            b_hist = db.books.find_one({"book_id": s['book_id']})
+            if b_hist:
+                pid = b_hist.get('parent_id', b_hist['book_id'])
+                # Strip suffixes just in case legacy data is mixed
+                pid = pid.replace("_short", "").replace("_long", "")
+                read_parent_ids.add(pid)
+
+        # Add current book
+        curr_book = db.books.find_one({"book_id": book_id})
+        curr_parent = curr_book.get('parent_id', book_id).replace("_short", "").replace("_long", "")
+        read_parent_ids.add(curr_parent)
+
+        # B. Get Titles of Read Books (for the AI Prompt)
+        # We just need a list of titles like ["Dracula", "Frankenstein"]
+        read_titles = db.books.distinct("title", {"parent_id": {"$in": list(read_parent_ids)}})
+
+        # C. Fetch Available Library (Only 'standard' edition candidates, excluding read ones)
+        # We filter by parent_id not being in our read list
+        available_cursor = db.books.find(
+            {
+                "parent_id": {"$nin": list(read_parent_ids)},
+                "chunk_size": 750 # Only recommend Standard editions to keep list clean
+            },
+            {"book_id": 1, "title": 1, "author": 1}
+        )
+
+        library_catalog = []
+        for b in available_cursor:
+            library_catalog.append({
+                "id": b['book_id'],
+                "title": b['title'],
+                "author": b.get('author', 'Unknown')
+            })
+
+        # D. Get AI Picks
+        suggestions = []
+        if library_catalog:
+            # Only ask AI if we have books to suggest
+            recommended_ids = ai.get_recommendations(read_titles, library_catalog)
+
+            if recommended_ids:
+                # Fetch the full book objects for the IDs returned by AI
+                suggestions = list(db.books.find({"book_id": {"$in": recommended_ids}}))
+
+        # E. Fallback (If AI fails or returns nothing, use random)
+        if not suggestions:
+            print("   [Victory] AI failed or no result. Falling back to random.")
+            suggestions = list(db.books.aggregate([
+                {"$match": {
+                    "parent_id": {"$nin": list(read_parent_ids)},
+                    "chunk_size": 750
+                }},
+                {"$sample": {"size": 3}}
+            ]))
+
+        # 3. Send Email (Same as before)
+        switch_token = security.generate_binge_token(sub_id)
+        book_title = curr_book['title'] if curr_book else "Your Book"
         subject = f"You finished {book_title}!"
-        
+
         html_body = format_victory_email(book_title, days_taken, total_words, suggestions, switch_token)
-        
+
         if debug:
             print(f"[DEBUG] VICTORY EMAIL for {email}")
             return True, "Debug: Victory email generated"
 
         success = send_via_sendgrid(email, subject, html_body)
-        
+
         if success:
             db.subscriptions.update_one(
                 {"_id": sub['_id']},

@@ -10,7 +10,7 @@ BACKUP_DIR = os.path.expanduser("~/backups")
 # The name of the container running Mongo (from BlueHorseshoe stack)
 CONTAINER_NAME = "mongo" 
 # How many days to keep backups before deleting old ones
-RETENTION_DAYS = 7
+RETENTION_DAYS = 3
 
 def create_backup():
     # 1. Ensure directory exists

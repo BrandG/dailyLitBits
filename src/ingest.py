@@ -3,6 +3,8 @@ import re
 import argparse
 import sys
 import os
+import shutil
+import google.generativeai as genai
 from pymongo import MongoClient
 import config
 import time
@@ -10,6 +12,14 @@ import time
 # --- SETUP ---
 client = MongoClient(config.MONGO_URI)
 db = client[config.DB_NAME]
+
+# --- AI & PATH CONFIGURATION ---
+COVER_DIR = "static/covers"
+GENAI_MODEL_NAME = 'models/gemini-flash-latest' 
+
+if config.GEMINI_API_KEY:
+    genai.configure(api_key=config.GEMINI_API_KEY)
+
 
 # --- CONFIGURATION ---
 EDITION_CONFIG = {
@@ -83,6 +93,77 @@ def clean_text(text):
 
     return "\n".join(lines[start_idx:end_idx]).strip()
 
+def download_cover(book_id):
+    """
+    Downloads the cover image from Project Gutenberg and saves it locally.
+    Returns the local relative path (e.g., '/static/covers/11.jpg') or None.
+    """
+    os.makedirs(COVER_DIR, exist_ok=True)
+    clean_id = book_id.lower().replace("pg", "").replace("_short", "").replace("_long", "")
+    
+    if not clean_id.isdigit():
+        return None
+    
+    remote_url = f"https://www.gutenberg.org/cache/epub/{clean_id}/pg{clean_id}.cover.medium.jpg"
+    filename = f"{clean_id}.jpg"
+    local_path = os.path.join(COVER_DIR, filename)
+    public_path = f"/{COVER_DIR}/{filename}"
+    
+    if os.path.exists(local_path):
+        return public_path
+        
+    try:
+        headers = {'User-Agent': 'DailyLitBits-Indexer/1.0'}
+        response = requests.get(remote_url, headers=headers, stream=True, timeout=10)
+        
+        if response.status_code == 200:
+            with open(local_path, 'wb') as f:
+                response.raw.decode_content = True
+                shutil.copyfileobj(response.raw, f)
+            print(f"   [Cover] Downloaded: {filename}")
+            time.sleep(0.5)
+            return public_path
+        else:
+            print(f"   [Cover] Not found for {book_id} (Status {response.status_code})")
+            return None
+            
+    except Exception as e:
+        print(f"   [Cover] Error downloading {book_id}: {e}")
+        return None
+
+def generate_blurb(title, author):
+    """
+    Asks Gemini to write a short hook for the book.
+    """
+    if not config.GEMINI_API_KEY:
+        return None
+
+    model = genai.GenerativeModel(GENAI_MODEL_NAME)
+    
+    prompt = f"""
+    You are a bookstore curator. Write a short, enticing "hook" description (max 2 sentences) for the book "{title}" by {author}.
+    
+    RULES:
+    1. Do NOT use phrases like "In this book", "This novel", or "Readers will".
+    2. Jump straight into the premise, atmosphere, or conflict.
+    3. Keep it under 40 words.
+    
+    EXAMPLE for Dracula:
+    "A young solicitor travels to Transylvania to finalize a property deal, only to discover his client is an ancient vampire with sights set on London."
+    """
+    
+    try:
+        print(f"   [AI] Generating blurb for '{title}'...")
+        response = model.generate_content(prompt)
+        blurb = response.text.strip()
+        print(f"        -> {blurb}")
+        time.sleep(1.0)
+        return blurb
+    except Exception as e:
+        print(f"   [AI] Error generating blurb: {e}")
+        return None
+
+
 # --- CORE CHUNKING LOGIC ---
 def create_edition_chunks(paragraphs, unique_book_id, edition_name, target_words):
     memory_chunks = []
@@ -96,7 +177,14 @@ def create_edition_chunks(paragraphs, unique_book_id, edition_name, target_words
             
         word_count = len(clean_para.split())
         
-        if current_word_count + word_count > target_words and current_chunk:
+        # 1. Will adding this paragraph blow the limit?
+        will_overflow = (current_word_count + word_count > target_words)
+        
+        # 2. Is the current chunk "meaty" enough to stand alone? (e.g. > 50% of target)
+        is_substantial = (current_word_count > (target_words * 0.5))
+        
+        # Only split if BOTH are true
+        if will_overflow and is_substantial and current_chunk:
             chunk_content = "\n\n".join(current_chunk)
             
             memory_chunks.append({
@@ -135,6 +223,11 @@ def ingest_book(text, title, author, base_book_id, source_url):
     
     print(f"Processing '{title}' (Base ID: {base_book_id})...")
     
+    # --- ENHANCEMENT ---
+    # Generate cover and blurb once for the base book
+    cover_url = download_cover(base_book_id)
+    description = generate_blurb(title, author)
+    
     # Generate Editions
     for edition_name, conf in EDITION_CONFIG.items():
         suffix = conf["suffix"]
@@ -165,11 +258,13 @@ def ingest_book(text, title, author, base_book_id, source_url):
             "source_url": source_url,
             "total_chunks": total_chunks,
             "edition": edition_name,
-            "chunk_size": target_words
+            "chunk_size": target_words,
+            "cover_url": cover_url,
+            "description": description
         }
         db.books.insert_one(book_doc)
 
-    print(f"Success! '{title}' ingested.")
+    print(f"Success! '{title}' ingested and enhanced.")
 
 def process_source(source, override_title=None, override_author=None, override_id=None):
     try:

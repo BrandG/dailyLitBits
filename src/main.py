@@ -14,8 +14,12 @@ from security import verify_unsub_token, verify_binge_token
 import dispatch 
 from datetime import datetime
 import security # Ensure this is imported
+from fastapi.staticfiles import StaticFiles
 
+# Add this AFTER creating the app = FastAPI() line
 app = FastAPI()
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
 templates = Jinja2Templates(directory="templates")
 
 security_auth = HTTPBasic()
@@ -525,3 +529,30 @@ async def handle_login(
     # 4. Redirect to Dashboard
     return RedirectResponse(url=f"/profile?token={token}", status_code=303)
 
+@app.get("/library", response_class=HTMLResponse)
+async def library(request: Request):
+    db = get_db()
+    
+    # 1. Fetch Books (Standard Edition)
+    books_cursor = db.books.find(
+        {"chunk_size": 750}, 
+        {"book_id": 1, "title": 1, "author": 1, "total_chunks": 1, "description": 1, "_id": 0}
+    ).sort("title", 1)
+    
+    books = []
+    for b in books_cursor:
+        # 2. Logic to generate Gutenberg Cover URL
+        # Format: pg123 -> 123
+        clean_id = b['book_id'].replace("pg", "")
+        if clean_id.isdigit():
+            b['cover_url'] = f"https://www.gutenberg.org/cache/epub/{clean_id}/pg{clean_id}.cover.medium.jpg"
+        else:
+            # Fallback for weird IDs or testing
+            b['cover_url'] = "https://via.placeholder.com/150x230?text=No+Cover"
+            
+        books.append(b)
+    
+    return templates.TemplateResponse("library.html", {
+        "request": request, 
+        "books": books
+    })
