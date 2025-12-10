@@ -556,3 +556,11 @@ async def library(request: Request):
         "request": request, 
         "books": books
     })
+
+@app.get("/privacy", response_class=HTMLResponse)
+async def privacy(request: Request):
+    return templates.TemplateResponse("privacy.html", {"request": request})
+
+@app.get("/intro", response_class=HTMLResponse)
+async def intro_page(request: Request):
+    return templates.TemplateResponse("intro.html", {"request": request})

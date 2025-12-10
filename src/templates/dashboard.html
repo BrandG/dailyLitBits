@@ -20,6 +20,7 @@
         <div class="row justify-content-center">
             <div class="col-md-8">
                 
+                <!-- CARD 1: CURRENTLY READING -->
                 <div class="card shadow-sm mb-4">
                     <div class="card-header">
                         <h5 class="mb-0">Currently Reading</h5>
@@ -41,6 +42,7 @@
                     </div>
                 </div>
 
+                <!-- CARD 2: READING SPEED -->
                 <div class="card shadow-sm mb-4">
                     <div class="card-body">
                         <h5 class="card-title mb-3">Reading Speed</h5>
@@ -70,10 +72,49 @@
                     </div>
                 </div>
                 
-                <div class="card shadow-sm">
+                <!-- CARD 3: SETTINGS -->
+                <div class="card shadow-sm mb-5">
                     <div class="card-body">
                         <h5 class="card-title mb-4">Settings</h5>
                         
+                        <!-- NEW: DELIVERY PREFERENCES FORM -->
+                        <form action="/update_preferences" method="post" class="mb-4 pb-3 border-bottom">
+                            <input type="hidden" name="token" value="{{ token }}">
+                            
+                            <div class="row g-3">
+                                <div class="col-md-6">
+                                    <label class="form-label small fw-bold text-muted">Time Zone</label>
+                                    <select name="timezone" class="form-select form-select-sm">
+                                        <option value="UTC" {% if user_tz == 'UTC' %}selected{% endif %}>UTC</option>
+                                        <option value="US/Eastern" {% if user_tz == 'US/Eastern' %}selected{% endif %}>US/Eastern</option>
+                                        <option value="US/Central" {% if user_tz == 'US/Central' %}selected{% endif %}>US/Central</option>
+                                        <option value="US/Mountain" {% if user_tz == 'US/Mountain' %}selected{% endif %}>US/Mountain</option>
+                                        <option value="US/Pacific" {% if user_tz == 'US/Pacific' %}selected{% endif %}>US/Pacific</option>
+                                        <option value="Europe/London" {% if user_tz == 'Europe/London' %}selected{% endif %}>Europe/London</option>
+                                        <option value="Europe/Paris" {% if user_tz == 'Europe/Paris' %}selected{% endif %}>Europe/Paris</option>
+                                        <option value="Asia/Tokyo" {% if user_tz == 'Asia/Tokyo' %}selected{% endif %}>Asia/Tokyo</option>
+                                        <option value="Australia/Sydney" {% if user_tz == 'Australia/Sydney' %}selected{% endif %}>Australia/Sydney</option>
+                                    </select>
+                                </div>
+                                
+                                <div class="col-md-4">
+                                    <label class="form-label small fw-bold text-muted">Delivery Hour</label>
+                                    <select name="delivery_hour" class="form-select form-select-sm">
+                                        {% for h in range(0, 24) %}
+                                        <option value="{{ h }}" {% if delivery_hour == h %}selected{% endif %}>
+                                            {{ h }}:00
+                                        </option>
+                                        {% endfor %}
+                                    </select>
+                                </div>
+                                
+                                <div class="col-md-2 d-flex align-items-end">
+                                    <button type="submit" class="btn btn-sm btn-primary w-100">Save</button>
+                                </div>
+                            </div>
+                        </form>
+                        
+                        <!-- VACATION MODE TOGGLE -->
                         <div class="d-flex justify-content-between align-items-center border-bottom pb-3 mb-3">
                             <div>
                                 <strong>Vacation Mode</strong>
@@ -82,14 +123,15 @@
                             <form action="/toggle_pause" method="post">
                                 <input type="hidden" name="token" value="{{ token }}">
                                 {% if status == 'active' %}
-                                    <button type="submit" class="btn btn-outline-secondary">Pause Emails</button>
+                                    <button type="submit" class="btn btn-outline-secondary btn-sm">Pause Emails</button>
                                 {% else %}
-                                    <button type="submit" class="btn btn-success">Resume Emails</button>
+                                    <button type="submit" class="btn btn-success btn-sm">Resume Emails</button>
                                 {% endif %}
                             </form>
                         </div>
                         
-                        <div class="alert {{ 'alert-success' if status == 'active' else 'alert-warning' }}">
+                        <!-- STATUS ALERT -->
+                        <div class="alert {{ 'alert-success' if status == 'active' else 'alert-warning' }} mb-0">
                             Current Status: <strong>{{ status|capitalize }}</strong>
                         </div>
                         

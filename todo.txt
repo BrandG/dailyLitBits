@@ -1,0 +1,18 @@
+DailyLitBits Roadmap
+
+- Webpage enhancements
+	* Add an intro page. Who we are, how we work, etc.
+	* Time Zone Adjustment: Allow people to change the hour that their e-mail comes to them. Also, allow them to change the timezone associated with them.
+
+- As you scale, if you haven't set up Sender Policy Framework (SPF) and DomainKeys Identified Mail (DKIM) records in your DNS (DigitalOcean/Namecheap) for SendGrid, Gmail/Yahoo will eventually start blocking your emails or sending them to Spam. Action: Verify these are green in your SendGrid dashboard. 
+
+- Backup Restore Test: You have a script that makes backups. Have you ever tried to restore one? (A backup you haven't restored is just a file taking up space). 
+
+- "Dead Letter" Monitoring: We need a way to see chunks that permanently failed the AI process (e.g., if the text was corrupt). A simple Admin Dashboard view for "Failed Chunks" would be smart. 
+
+- What if someone wanted to read multiple books per day? Could we allow that? It would certainly be a premium service.
+
+- Do we want to set up a testing framework? What would we test?
+
+- Instead of a dropdown on the main page, we should find a way to use the library code. Perhaps we make it like an openable section on the main page that shows all the books as tiles.
+
