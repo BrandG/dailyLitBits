@@ -1,7 +1,7 @@
 DailyLitBits Roadmap
 
 - Webpage enhancements
-	* Add an intro page. Who we are, how we work, etc.
+
 	* Time Zone Adjustment: Allow people to change the hour that their e-mail comes to them. Also, allow them to change the timezone associated with them.
 
 - As you scale, if you haven't set up Sender Policy Framework (SPF) and DomainKeys Identified Mail (DKIM) records in your DNS (DigitalOcean/Namecheap) for SendGrid, Gmail/Yahoo will eventually start blocking your emails or sending them to Spam. Action: Verify these are green in your SendGrid dashboard. 

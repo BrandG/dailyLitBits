@@ -33,3 +33,5 @@ pytz
 passlib
 argon2-cffi
 beautifulsoup4
+pytest
+httpx
