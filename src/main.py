@@ -1,3 +1,4 @@
+from logger import log
 import secrets
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -15,6 +16,7 @@ import dispatch
 from datetime import datetime
 import security # Ensure this is imported
 from fastapi.staticfiles import StaticFiles
+import pymongo # Added for DuplicateKeyError
 
 # Add this AFTER creating the app = FastAPI() line
 app = FastAPI()
@@ -43,13 +45,15 @@ def get_current_admin(credentials: HTTPBasicCredentials = Depends(security_auth)
         )
     return credentials.username
 
-def get_db():
+async def get_db():
     client = MongoClient(config.MONGO_URI)
-    return client[config.DB_NAME]
+    try:
+        yield client[config.DB_NAME]
+    finally:
+        client.close()
 
 @app.get("/", response_class=HTMLResponse)
-async def read_root(request: Request):
-    db = get_db()
+async def read_root(request: Request, db: MongoClient = Depends(get_db)):
     # FILTER: Only show Standard Edition (750 words) to keep the list clean
     books = list(db.books.find(
         {"chunk_size": 750}, 
@@ -65,18 +69,25 @@ async def handle_signup(
     request: Request,
     email: str = Form(...),
     book_id: str = Form(...),
-    timezone: str = Form("UTC")
+    timezone: str = Form("UTC"),
+    db: MongoClient = Depends(get_db)
 ):
-    db = get_db()
     manager = UserManager(db)
 
     # 1. Create User (or get existing ID if we implement check later)
     # The create_user method returns the new _id
     try:
         user_id = manager.create_user(email, timezone=timezone)
-    except Exception as e:
-        # In case of duplicate key error or other DB issues
-        print(f"[ERROR] Signup Failed: {e}")
+    except ValueError as e: # Catch specific ValueError for duplicate email
+        log(f"[WARN] Signup blocked for duplicate email: {email}")
+        # Return a user-friendly error page/message
+        return templates.TemplateResponse("index.html", {
+            "request": request,
+            "books": list(db.books.find({"chunk_size": 750}, {"book_id": 1, "title": 1, "author": 1, "_id": 0}).sort("title", 1)),
+            "error_message": "This email address is already registered. Please try a different one."
+        }, status_code=400)
+    except pymongo.errors.DuplicateKeyError as e: # Catch specific DuplicateKeyError
+        log(f"[ERROR] Signup Failed: {type(e).__name__}: {e}")
         return HTMLResponse("<h1>Error: Could not create user. Email might be taken.</h1>", status_code=500)
 
     # 2. Create Subscription DIRECTLY (Bypassing subscribe.py)
@@ -108,7 +119,7 @@ async def handle_signup(
     })
 
 @app.get("/next", response_class=HTMLResponse)
-async def trigger_next_chapter(request: Request, token: str):
+async def trigger_next_chapter(request: Request, token: str, db: MongoClient = Depends(get_db)):
     sub_id_str = verify_binge_token(token)
     
     if not sub_id_str:
@@ -132,8 +143,7 @@ async def trigger_next_chapter(request: Request, token: str):
     return HTMLResponse(content=html_content)
 
 @app.get("/admin", response_class=HTMLResponse)
-async def admin_dashboard(request: Request, admin: str = Depends(get_current_admin)):
-    db = get_db()
+async def admin_dashboard(request: Request, admin: str = Depends(get_current_admin), db: MongoClient = Depends(get_db)):
 
     # 1. Fetch all subscriptions
     subs = list(db.subscriptions.find({}))
@@ -184,7 +194,7 @@ async def admin_dashboard(request: Request, admin: str = Depends(get_current_adm
 
 # --- NEW: STEP 1 - SHOW CONFIRMATION PAGE ---
 @app.get("/unsubscribe", response_class=HTMLResponse)
-async def unsubscribe_confirm(request: Request, token: str):
+async def unsubscribe_confirm(request: Request, token: str, db: MongoClient = Depends(get_db)):
     # Just verify token validity, don't unsubscribe yet
     sub_id_str = verify_unsub_token(token)
     
@@ -213,8 +223,7 @@ async def unsubscribe_confirm(request: Request, token: str):
 
 # --- NEW: STEP 2 - ACTUALLY UNSUBSCRIBE ---
 @app.post("/unsubscribe", response_class=HTMLResponse)
-async def unsubscribe_process(request: Request, token: str = Form(...)):
-    db = get_db()
+async def unsubscribe_process(request: Request, token: str = Form(...), db: MongoClient = Depends(get_db)):
     sub_id_str = verify_unsub_token(token)
     
     if not sub_id_str:
@@ -240,8 +249,7 @@ async def unsubscribe_process(request: Request, token: str = Form(...)):
 
 # --- NEW: ONE-CLICK BOOK SWITCH ---
 @app.get("/switch_book", response_class=HTMLResponse)
-async def switch_book(request: Request, token: str, new_book_id: str):
-    db = get_db()
+async def switch_book(request: Request, token: str, new_book_id: str, db: MongoClient = Depends(get_db)):
 
     # 1. Verify User
     sub_id_str = verify_binge_token(token)
@@ -290,9 +298,9 @@ async def process_claim(
     request: Request,
     token: str = Form(...),
     username: str = Form(...),
-    password: str = Form(...)
+    password: str = Form(...),
+    db: MongoClient = Depends(get_db)
 ):
-    db = get_db()
 
     # 1. Verify Token again
     sub_id_str = verify_binge_token(token)
@@ -323,8 +331,7 @@ async def process_claim(
 
 
 @app.get("/profile", response_class=HTMLResponse)
-async def profile_page(request: Request, token: str):
-    db = get_db()
+async def profile_page(request: Request, token: str, db: MongoClient = Depends(get_db)):
 
     # 1. Verify Token
     sub_id_str = verify_binge_token(token)
@@ -386,9 +393,7 @@ async def profile_page(request: Request, token: str):
 
 # --- NEW: VACATION MODE TOGGLE ---
 @app.post("/toggle_pause", response_class=HTMLResponse)
-async def toggle_pause(request: Request, token: str = Form(...)):
-    db = get_db()
-
+async def toggle_pause(request: Request, token: str = Form(...), db: MongoClient = Depends(get_db)):
     sub_id_str = verify_binge_token(token)
     if not sub_id_str: return HTMLResponse("Invalid Token", status_code=400)
 
@@ -421,9 +426,9 @@ async def handle_suggestion(
     title: str = Form(...),
     author: str = Form(...),
     link: str = Form(None),
-    comments: str = Form(None)
+    comments: str = Form(None),
+    db: MongoClient = Depends(get_db)
 ):
-    db = get_db()
 
     # Save to new 'suggestions' collection
     suggestion = {
@@ -452,8 +457,7 @@ async def handle_suggestion(
     return HTMLResponse(content=html_content)
 
 @app.post("/change_edition", response_class=HTMLResponse)
-async def change_edition(request: Request, token: str = Form(...), target_edition: str = Form(...)):
-    db = get_db()
+async def change_edition(request: Request, token: str = Form(...), target_edition: str = Form(...), db: MongoClient = Depends(get_db)):
     sub_id_str = verify_binge_token(token)
     if not sub_id_str: return HTMLResponse("Invalid Token", status_code=400)
     
@@ -501,9 +505,9 @@ async def login_page(request: Request):
 async def handle_login(
     request: Request,
     username: str = Form(...),
-    password: str = Form(...)
+    password: str = Form(...),
+    db: MongoClient = Depends(get_db)
 ):
-    db = get_db()
     manager = UserManager(db)
     
     # 1. Verify Credentials
@@ -530,9 +534,7 @@ async def handle_login(
     return RedirectResponse(url=f"/profile?token={token}", status_code=303)
 
 @app.get("/library", response_class=HTMLResponse)
-async def library(request: Request):
-    db = get_db()
-    
+async def library(request: Request, db: MongoClient = Depends(get_db)):
     # 1. Fetch Books (Standard Edition)
     books_cursor = db.books.find(
         {"chunk_size": 750}, 

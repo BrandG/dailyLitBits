@@ -1,7 +1,7 @@
 import pytz
 from datetime import datetime
 from cryptography.fernet import Fernet
-from passlib.context import CryptContext # <--- NEW
+from passlib.context import CryptContext
 import config
 
 # Setup Password Hashing (Bcrypt)
@@ -19,12 +19,17 @@ class UserManager:
         """
         Creates a 'Ghost' user (no password, no username yet).
         """
-        # Check if email exists (by searching all users - inefficient but fine for now)
-        # Ideally, we'd hash emails for lookup, but for now we iterate or catch duplicates
-        # optimizing this is a future task.
+        # Manual (inefficient) check for existing email due to non-deterministic encryption
+        for existing_user in self.db.users.find({}):
+            decrypted_email = self.cipher.decrypt(existing_user['email_enc']).decode()
+            if decrypted_email == email.lower():
+                print(f"[DEBUG] UserManager.create_user: Duplicate email found for {email}. Raising ValueError.")
+                raise ValueError("Email already registered.")
+
+        encrypted_email = self.encrypt_email(email)
         
         user = {
-            "email_enc": self.encrypt_email(email),
+            "email_enc": encrypted_email,
             "timezone": timezone,
             "created_at": datetime.now(),
             "username": None,      # <--- NEW
@@ -34,6 +39,7 @@ class UserManager:
         }
         
         result = self.db.users.insert_one(user)
+        print(f"[DEBUG] UserManager.create_user: User inserted with _id: {result.inserted_id}")
         return result.inserted_id
 
     # --- NEW AUTHENTICATION METHODS ---

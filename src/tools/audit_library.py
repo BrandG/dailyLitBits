@@ -1,3 +1,4 @@
+from logger import log
 import os
 import sys
 import json
@@ -56,11 +57,11 @@ def check_consistency(title, author, description):
         data = json.loads(response.text)
         return data.get("match"), data.get("reason"), data.get("corrected_blurb")
     except Exception as e:
-        print(f"   [AI Error] {e}")
+        log(f"   [AI Error] {e}")
         return None, str(e), None
 
 def run_audit(auto_fix=False):
-    print("--- Starting Library Metadata Audit ---")
+    log("--- Starting Library Metadata Audit ---")
     
     # Only check standard books that actually HAVE a description
     books = list(db.books.find({
@@ -81,12 +82,12 @@ def run_audit(auto_fix=False):
         
         if is_match is False:
             issues_found += 1
-            print(f"\n[MISMATCH DETECTED] {title}")
-            print(f"   Current: {desc}")
-            print(f"   AI Reason: {reason}")
+            log(f"\n[MISMATCH DETECTED] {title}")
+            log(f"   Current: {desc}")
+            log(f"   AI Reason: {reason}")
             
             if auto_fix and fix:
-                print(f"   -> AUTO-FIXING with: {fix}")
+                log(f"   -> AUTO-FIXING with: {fix}")
                 # Update all editions
                 base_id = book['book_id'].replace("_short", "").replace("_long", "")
                 db.books.update_many(
@@ -94,13 +95,13 @@ def run_audit(auto_fix=False):
                     {"$set": {"description": fix}}
                 )
             elif fix:
-                print(f"   -> Suggested Fix: {fix}")
+                log(f"   -> Suggested Fix: {fix}")
         else:
-            print(f".", end="", flush=True) # Progress dot for good books
+            print(".", end="", flush=True) # Progress dot for good books
             
         time.sleep(0.5) # Rate limit protection
 
-    print(f"\n\n--- Audit Complete. Found {issues_found} issues. ---")
+    log(f"\n\n--- Audit Complete. Found {issues_found} issues. ---")
 
 if __name__ == "__main__":
     # Run with auto_fix=True if you trust the AI, or False to just see logs

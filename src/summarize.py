@@ -1,3 +1,4 @@
+from logger import log
 import time
 from pymongo import MongoClient
 import config
@@ -7,14 +8,14 @@ client = MongoClient(config.MONGO_URI)
 db = client[config.DB_NAME]
 
 def backfill_recaps():
-    print(f"--- Starting AI Backfill Worker ---")
+    log(f"--- Starting AI Backfill Worker ---")
     
     # REMOVED .limit(50) so it does everything
     query = {"sequence": {"$gt": 1}, "recap": None}
     # Using a cursor instead of list() prevents loading 72k objects into RAM at once
     cursor = db.chunks.find(query) 
     
-    print(f"Found {db.chunks.count_documents(query)} chunks needing recaps.")
+    log(f"Found {db.chunks.count_documents(query)} chunks needing recaps.")
     
     count = 0
     for chunk in cursor:
@@ -31,7 +32,7 @@ def backfill_recaps():
         
         # Log less frequently to keep terminal clean
         if count % 100 == 0:
-            print(f"[{count}] Processing {book_id} part {seq}...")
+            log(f"[{count}] Processing {book_id} part {seq}...")
         
         summary = ai.generate_recap(prev_chunk['content'], previous_recap=context_summary)
         
@@ -42,12 +43,12 @@ def backfill_recaps():
             )
         else:
             # CHANGED: Don't stop, just log and move on
-            print(f"   [!] Failed to generate for {book_id} {seq}. Skipping.")
+            log(f"   [!] Failed to generate for {book_id} {seq}. Skipping.")
         
         count += 1
         # No sleep needed for Tier 1
 
-    print("--- Backfill Run Complete ---")
+    log("--- Backfill Run Complete ---")
 
 if __name__ == "__main__":
     backfill_recaps()
