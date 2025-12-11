@@ -1,8 +1,16 @@
 DailyLitBits Roadmap
 
 - Webpage enhancements
-
 	* Time Zone Adjustment: Allow people to change the hour that their e-mail comes to them. Also, allow them to change the timezone associated with them.
+
+- Testing Framework
+	* API Endpoint Test: User Signup (POST /signup)
+	* API Endpoint Test: All Static Pages (/intro, /library, /privacy)
+	* API Endpoint Test: Unsubscribe Flow (GET/POST /unsubscribe)
+	* API Endpoint Test: Admin Page (GET /admin)
+	* Unit Test: Text Cleaning (ingest.py::clean_text)
+	* Unit Test: Metadata Extraction (ingest.py::extract_title, extract_author)
+	* Unit Test: Security Token Logic (security.py)
 
 - As you scale, if you haven't set up Sender Policy Framework (SPF) and DomainKeys Identified Mail (DKIM) records in your DNS (DigitalOcean/Namecheap) for SendGrid, Gmail/Yahoo will eventually start blocking your emails or sending them to Spam. Action: Verify these are green in your SendGrid dashboard. 
 
@@ -15,4 +23,3 @@ DailyLitBits Roadmap
 - Do we want to set up a testing framework? What would we test?
 
 - Instead of a dropdown on the main page, we should find a way to use the library code. Perhaps we make it like an openable section on the main page that shows all the books as tiles.
-
