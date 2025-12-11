@@ -97,7 +97,7 @@ def format_email_html(title, sequence, total_chunks, content, unsub_token, binge
     return template
 
 # --- UPGRADED VICTORY TEMPLATE (Table-Based for Email Compatibility) ---
-def format_victory_email(book_title, days_taken, word_count, suggestions, switch_token):
+def format_victory_email(book_title, days_taken, word_count, suggestions, switch_token, additional_message=None):
     base_url = "https://dailylitbits.com"
 
     # Grammar fix: "1 Day" vs "2 Days"
@@ -121,11 +121,18 @@ def format_victory_email(book_title, days_taken, word_count, suggestions, switch
         </div>
         """
 
+    # Render additional message if provided
+    message_html = ""
+    if additional_message:
+        message_html = f"<p style=\"margin-top: 20px; font-size: 16px;\">{additional_message}</p>"
+
     template = f"""
     <html>
     <body style="font-family: sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; text-align: center;">
         <h1 style="color: #28a745; margin-bottom: 10px;">Congratulations!</h1>
         <h2 style="color: #555; font-weight: normal; margin-top: 0;">You have finished<br><strong>{book_title}</strong></h2>
+
+        {message_html}
 
         <table width="100%" cellpadding="0" cellspacing="0" style="background-color: #f8f9fa; border: 1px solid #ddd; border-radius: 10px; margin: 30px 0; border-collapse: separate;">
             <tr>
@@ -219,29 +226,6 @@ def process_subscription(sub_id, trigger="cron", debug=False):
 
         print(f"    [Victory] Generating smart recommendations for {user_id}...")
         
-        # A. Get User History (Completed books + Current book)
-        completed_subs = list(db.subscriptions.find(
-            {"user_id": user_id, "status": "completed"}
-        ))
-
-        # We use 'parent_id' (e.g., 'pg11') to normalize editions (pg11_short vs pg11)
-        # If 'parent_id' is missing (legacy data), fallback to 'book_id'
-        read_parent_ids = set()
-
-        # Add past books
-        for s in completed_subs:
-            b_hist = db.books.find_one({"book_id": s['book_id']})
-            if b_hist:
-                pid = b_hist.get('parent_id', b_hist['book_id'])
-                # Strip suffixes just in case legacy data is mixed
-                pid = pid.replace("_short", "").replace("_long", "")
-                read_parent_ids.add(pid)
-
-        # Add current book
-        curr_book = db.books.find_one({"book_id": book_id})
-        curr_parent = curr_book.get('parent_id', book_id).replace("_short", "").replace("_long", "")
-        read_parent_ids.add(curr_parent)
-
         # B. Get Titles of Read Books (for the AI Prompt)
         # We just need a list of titles like ["Dracula", "Frankenstein"]
         read_titles = db.books.distinct("title", {"parent_id": {"$in": list(read_parent_ids)}})
@@ -284,126 +268,40 @@ def process_subscription(sub_id, trigger="cron", debug=False):
                 }},
                 {"$sample": {"size": 3}}
             ]))
+        
+        # --- ACTIVATE NEXT QUEUED BOOK ---
+        next_queued_sub = db.subscriptions.find_one(
+            {"user_id": user_id, "status": "queued"},
+            sort=[("created_at", 1)] # Get the oldest one
+        )
 
-        # 3. Send Email (Same as before)
+        next_book_title = None
+        if next_queued_sub:
+            print(f"   [Victory] Activating next queued book for {user_id}: {next_queued_sub['book_id']}")
+            db.subscriptions.update_one(
+                {"_id": next_queued_sub['_id']},
+                {"$set": {
+                    "status": "active", 
+                    "current_sequence": 1, 
+                    "created_at": datetime.now(), # Reset stats for the new book
+                    "last_sent": None # Allows immediate sending of the first part
+                }}
+            )
+            # Fetch title for email notification
+            next_book_info = db.books.find_one({"book_id": next_queued_sub['book_id']})
+            if next_book_info:
+                next_book_title = next_book_info['title']
+        # --------------------------------
+
+        # F. Send Victory Email
         switch_token = security.generate_binge_token(sub_id)
         book_title = curr_book['title'] if curr_book else "Your Book"
         subject = f"You finished {book_title}!"
 
-        html_body = format_victory_email(book_title, days_taken, total_words, suggestions, switch_token)
-
-        if debug:
-            print(f"[DEBUG] VICTORY EMAIL for {email}")
-            return True, "Debug: Victory email generated"
-
-        success = send_via_sendgrid(email, subject, html_body)
-
-        if success:
-            db.subscriptions.update_one(
-                {"_id": sub['_id']},
-                {"$set": {"status": "completed", "completed_at": datetime.now()}}
-            )
-            return True, "Congratulations! You finished the book."
-        else:
-            return False, "Failed to send victory email."
-    # --------------------------
-
-    # Normal Email Logic (Same as before)
-    book = db.books.find_one({"book_id": book_id})
-    book_title = book['title'] if book else "Your Book"
-    total_chunks = book.get('total_chunks', 100) if book else 100
-    subject = f"{book_title}: Part {seq}"
-    
-    unsub_token = security.generate_unsub_token(sub_id)
-    binge_token = security.generate_binge_token(sub_id)
-    recap_text = chunk.get('recap')
-    
-    if not recap_text and seq > 1:
-        print(f"   [JIT AI] Recap missing for {book_id} part {seq}. Generating with Rolling Context...")
+        # --- MODIFY VICTORY EMAIL CONTENT ---        
+        victory_message = f"Congratulations! You have finished <strong>{book_title}</strong>."
+        if next_book_title:
+            victory_message += f"<p style=\"margin-top: 20px;\">Your next book, <strong>{next_book_title}</strong>, will start arriving tomorrow!</p>"
         
-        # 1. Fetch the PREVIOUS chunk (We need its recap to provide context)
-        prev_seq = seq - 1
-        prev_chunk = db.chunks.find_one({"book_id": book_id, "sequence": prev_seq})
-        
-        if prev_chunk:
-            # 2. Get the Context (The summary of everything up to prev_chunk)
-            context_summary = prev_chunk.get('recap')
-            
-            # 3. Generate Rolling Summary
-            new_recap = ai.generate_recap(prev_chunk['content'], previous_recap=context_summary)
-            
-            if new_recap:
-                db.chunks.update_one(
-                    {"_id": chunk['_id']}, 
-                    {"$set": {"recap": new_recap}}
-                )
-                recap_text = new_recap
-                print(f"   [JIT AI] Success! Saved rolling recap.")
-            else:
-                print(f"   [JIT AI] Generation failed.")
-    # -------------------------------
-    
-    html_body = format_email_html(book_title, seq, total_chunks, chunk['content'], unsub_token, binge_token, recap_text)
-
-    if debug:
-        print(f"[DEBUG] Generated email for {email}")
-        return True, "Debug mode: Email generated"
-
-    success = send_via_sendgrid(email, subject, html_body)
-    
-    if success:
-        db.subscriptions.update_one(
-            {"_id": sub['_id']},
-            {
-                "$inc": {"current_sequence": 1},
-                "$set": {"last_sent": datetime.now()} 
-            }
-        )
-        return True, "Email sent successfully"
-    else:
-        return False, "Failed to send email via provider"
-
-
-def send_daily_emails(debug=False, force=False):
-    print(f"--- STARTING DISPATCH RUN: {datetime.now()} (Debug={debug}, Force={force}) ---")
-    active_subs = db.subscriptions.find({"status": "active"})
-    count = 0
-    
-    for sub in active_subs:
-        # (Standard Dispatch Loop Code - Same as before)
-        user_id = sub['user_id']
-        sub_id = sub['_id']
-        last_sent = sub.get('last_sent')
-        user = db.users.find_one({"_id": user_id})
-        if not user: continue
-        
-        # Timezone Logic
-        user_tz_str = user.get('timezone', 'UTC')
-        try: user_tz = pytz.timezone(user_tz_str)
-        except pytz.UnknownTimeZoneError: user_tz = pytz.utc
-        user_now = datetime.now(pytz.utc).astimezone(user_tz)
-        if not force and user_now.hour != TARGET_HOUR: continue
-
-        if last_sent:
-            if last_sent.tzinfo is None: last_sent = pytz.utc.localize(last_sent)
-            last_sent_local = last_sent.astimezone(user_tz)
-            if not force and last_sent_local.date() == user_now.date():
-                print(f"   [INFO] Skipping {sub_id}: Already sent today.")
-                continue
-
-        print(f"Processing Sub {sub_id}...")
-        success, msg = process_subscription(sub_id, trigger='cron', debug=debug)
-        if success:
-            count += 1
-            print(f"   -> Success: {msg}")
-        else:
-            print(f"   -> Failed: {msg}")
-
-    print(f"--- RUN COMPLETE. Sent {count} emails. ---")
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--debug", action="store_true")
-    parser.add_argument("--force", action="store_true")
-    args = parser.parse_args()
-    send_daily_emails(debug=args.debug, force=args.force)
+        html_body = format_victory_email(book_title, days_taken, total_words, suggestions, switch_token, additional_message=victory_message)
+        # ------------------------------------

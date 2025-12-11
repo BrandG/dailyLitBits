@@ -42,6 +42,33 @@
                     </div>
                 </div>
 
+                <!-- CARD 1.5: UP NEXT QUEUE -->
+                {% if queued_books and queued_books|length > 0 %}
+                <div class="card shadow-sm mb-4">
+                    <div class="card-header">
+                        <h5 class="mb-0">Up Next</h5>
+                    </div>
+                    <div class="card-body">
+                        {% for book in queued_books %}
+                        <div class="d-flex justify-content-between align-items-center mb-3 pb-3 border-bottom last-child-no-border">
+                            <div>
+                                <strong class="d-block">{{ book.title }}</strong>
+                                <span class="text-muted small">by {{ book.author }}</span>
+                            </div>
+                            <div>
+                                <a href="/switch_book?token={{ token }}&new_book_id={{ book.book_id }}" 
+                                   class="btn btn-sm btn-outline-primary">
+                                    Start Reading
+                                </a>
+                                <!-- Bonus: Remove button - would need a new route/form -->
+                                <!-- <button class="btn btn-sm btn-outline-danger ms-2">Remove</button> -->
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+                {% endif %}
+
                 <!-- CARD 2: READING SPEED -->
                 <div class="card shadow-sm mb-4">
                     <div class="card-body">

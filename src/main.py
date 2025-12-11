@@ -90,13 +90,17 @@ async def handle_signup(
         log(f"[ERROR] Signup Failed: {type(e).__name__}: {e}")
         return HTMLResponse("<h1>Error: Could not create user. Email might be taken.</h1>", status_code=500)
 
-    # 2. Create Subscription DIRECTLY (Bypassing subscribe.py)
-    # This ensures we link exactly to the user we just created
+    # 2. Create Subscription
+    # Check if user already has an active subscription
+    active_subs_count = db.subscriptions.count_documents({"user_id": user_id, "status": "active"})
+
+    new_status = "active" if active_subs_count == 0 else "queued"
+    
     sub_data = {
         "user_id": user_id,
         "book_id": book_id,
         "current_sequence": 1,
-        "status": "active",
+        "status": new_status,
         "created_at": datetime.now(),
         "last_sent": None
     }
@@ -104,18 +108,23 @@ async def handle_signup(
     try:
         db.subscriptions.insert_one(sub_data)
     except Exception as e:
-        print(f"[ERROR] Subscription Failed: {e}")
+        log(f"[ERROR] Subscription Failed: {e}")
         return HTMLResponse("<h1>Error: Could not create subscription.</h1>", status_code=500)
 
     # 3. Success Response
     books = list(db.books.find({}, {"book_id": 1, "title": 1, "author": 1, "_id": 0}))
     book_info = db.books.find_one({"book_id": book_id})
     book_title = book_info['title'] if book_info else book_id
+    
+    if new_status == "queued":
+        message = f"Added '{book_title}' to your reading queue. It will start when your current book finishes."
+    else: # new_status == "active"
+        message = f"Success! You will start receiving '{book_title}' tomorrow at 6:00 AM ({timezone})."
 
     return templates.TemplateResponse("index.html", {
         "request": request,
         "books": books,
-        "message": f"Success! You will start receiving '{book_title}' tomorrow at 6:00 AM ({timezone})."
+        "message": message
     })
 
 @app.get("/next", response_class=HTMLResponse)
@@ -380,10 +389,33 @@ async def profile_page(request: Request, token: str, db: MongoClient = Depends(g
         current_edition = "long"
         edition_label = "Long (~1500 words)"
 
+    # Fetch queued books for the 'Up Next' section
+    queued_subscriptions = list(db.subscriptions.find(
+        {"user_id": sub['user_id'], "status": "queued"},
+        sort=[("created_at", 1)] # Oldest first
+    ))
+
+    queued_books_data = []
+    for q_sub in queued_subscriptions:
+        q_book = db.books.find_one({"book_id": q_sub['book_id']})
+        if q_book:
+            queued_books_data.append({
+                "title": q_book.get('title', q_sub['book_id']),
+                "author": q_book.get('author', 'Unknown Author'),
+                "book_id": q_book['book_id'],
+                "subscription_id": str(q_sub['_id'])
+            })
+
+    # Add user timezone and delivery hour to context if missing
+    user_tz = user.get('timezone', 'UTC')
+    delivery_hour = sub.get('delivery_hour', 6) # Default to 6 AM as in dispatch.py
+
     return templates.TemplateResponse("dashboard.html", {
         "request": request,
         "token": token,
         "username": user.get('username'),
+        "user_tz": user_tz, # Pass it to template
+        "delivery_hour": delivery_hour, # Pass it to template
         "book_title": book.get('title', 'Unknown'),
         "book_author": book.get('author', 'Unknown'),
         "current": current,
@@ -393,7 +425,9 @@ async def profile_page(request: Request, token: str, db: MongoClient = Depends(g
         "status": sub.get('status', 'active'),
         # NEW FIELDS
         "current_edition": current_edition,
-        "edition_label": edition_label
+        "edition_label": edition_label,
+        # ADDING THIS
+        "queued_books": queued_books_data
     })
 
 # --- NEW: VACATION MODE TOGGLE ---

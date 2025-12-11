@@ -34,6 +34,8 @@ All commands **MUST** be run within the Docker environment.
 
 1.  **Build/Rebuild:** `docker compose -f docker/docker-compose.yml build`
 2.  **Start Services:** `docker compose -f docker/docker-compose.yml up -d`
+
+    The default is to have the dailylitbits container up, so do not leave it shut down normally.
 3.  **Restart Services:** `docker compose -f docker/docker-compose.yml restart web`
 
 The application is accessible at `http://localhost:8002`.
