@@ -6,8 +6,12 @@ import config
 import os
 import time
 from datetime import datetime
+import security
+from bson import ObjectId
+
 
 # --- FIXTURES ---
+
 
 # Use a unique database name for each test run to ensure isolation
 @pytest.fixture(scope="module")
@@ -97,7 +101,7 @@ def test_signup_duplicate_email(test_app_client, test_db_client):
     }).inserted_id
     test_db_client.subscriptions.insert_one({
         "user_id": existing_user_id,
-        "book_id": test_book_id,
+        "book_id": "pg12",
         "current_sequence": 1,
         "status": "active",
         "created_at": datetime.now(),
@@ -132,3 +136,93 @@ def test_signup_missing_fields(test_app_client):
     # FastAPI returns 422 for validation errors (missing required form fields)
     assert response.status_code == 422
     # You might check for specific error detail in JSON response if needed
+
+def test_intro_page(test_app_client):
+    response = test_app_client.get("/intro")
+    assert response.status_code == 200
+    assert "Welcome to DailyLitBits" in response.text
+
+def test_library_page(test_app_client):
+    response = test_app_client.get("/library")
+    assert response.status_code == 200
+    assert "The Library" in response.text
+    # Add a minimal book to the test_db to ensure the library page has content to render
+    # and doesn't crash if the book list is empty
+    # This assumes test_db_client is available in this scope, which it is for fixtures
+    # However, test_db_client is a module-scoped fixture, so it's not directly accessible
+    # in an app-scoped test. We might need to adjust fixture scope or inject db for this.
+    # For now, let's just check for general page elements.
+
+def test_privacy_page(test_app_client):
+    response = test_app_client.get("/privacy")
+    assert response.status_code == 200
+    assert "Privacy Policy" in response.text
+
+def test_unsubscribe_flow(test_app_client, test_db_client):
+    # 1. Setup: Create a user and an active subscription
+    user_id = test_db_client.users.insert_one({
+        "email_enc": cipher.encrypt(b"unsub@example.com"),
+        "timezone": "UTC"
+    }).inserted_id
+
+    sub_id = test_db_client.subscriptions.insert_one({
+        "user_id": user_id,
+        "book_id": "pg13",
+        "current_sequence": 5,
+        "status": "active"
+    }).inserted_id
+
+    # 2. Generate a valid token for this subscription
+    token = security.generate_unsub_token(sub_id)
+
+    # 3. Test GET request to the confirmation page
+    get_response = test_app_client.get(f"/unsubscribe?token={token}")
+    assert get_response.status_code == 200
+    assert "Are you sure you want to stop receiving this book?" in get_response.text
+
+    # 4. Test POST request to process the unsubscription
+    post_response = test_app_client.post(
+        "/unsubscribe",
+        data={"token": token}
+    )
+    assert post_response.status_code == 200
+    assert "You have been successfully unsubscribed." in post_response.text
+
+    # 5. Verify the subscription status in the database
+    updated_sub = test_db_client.subscriptions.find_one({"_id": sub_id})
+    assert updated_sub['status'] == "unsubscribed"
+
+def test_admin_page_unauthorized(test_app_client):
+    response = test_app_client.get("/admin")
+    assert response.status_code == 401
+
+def test_admin_page_authorized(test_app_client, test_db_client):
+    # 1. Setup: Create a user and subscription to ensure the page has data
+    user_email = "admin_test@example.com"
+    user_id = test_db_client.users.insert_one({
+        "email_enc": cipher.encrypt(user_email.encode()),
+        "timezone": "UTC"
+    }).inserted_id
+    test_db_client.subscriptions.insert_one({
+        "user_id": user_id,
+        "book_id": "pg14",
+        "status": "active"
+    })
+    test_db_client.books.insert_one({
+        "book_id": "pg14",
+        "title": "Admin Test Book",
+        "author": "Admin Author",
+        "total_chunks": 100
+    })
+
+    # 2. Access the admin page with correct credentials
+    response = test_app_client.get(
+        "/admin",
+        auth=("admin", "change_this_password")
+    )
+
+    # 3. Assert success and that our test user's data is present
+    assert response.status_code == 200
+    assert "Admin Dashboard" in response.text
+    assert user_email in response.text
+    assert "Admin Test Book" in response.text

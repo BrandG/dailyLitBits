@@ -54,21 +54,23 @@ def derive_metadata(source):
     raise ValueError(f"Could not interpret source '{source}'")
 
 def extract_title(text):
-    match = re.search(r'^Title:\s+(.+)$', text, re.MULTILINE)
+    match = re.search(r'Title:\s+(.+)$', text, re.MULTILINE | re.IGNORECASE)
     return match.group(1).strip() if match else "Unknown Title"
 
 def extract_author(text):
-    match = re.search(r'^Author:\s+(.+)$', text, re.MULTILINE)
+    match = re.search(r'Author:\s+(.+)$', text, re.MULTILINE | re.IGNORECASE)
     return match.group(1).strip() if match else "Unknown Author"
 
 def clean_text(text):
     start_markers = [
-        r"\*\*\* ?START OF (THE|THIS) PROJECT GUTENBERG.*",
+        r"\
+* ?START OF (THE|THIS) PROJECT GUTENBERG.*",
         r"START OF THE PROJECT GUTENBERG",
         r"start of the project gutenberg",
     ]
     end_markers = [
-        r"\*\*\* ?END OF (THE|THIS) PROJECT GUTENBERG.*",
+        r"\
+* ?END OF (THE|THIS) PROJECT GUTENBERG.*",
         r"End of (The )?Project Gutenberg",
         r"End of the project gutenberg",
     ]
@@ -146,7 +148,7 @@ def generate_blurb(title, author):
     RULES:
     1. Do NOT use phrases like "In this book", "This novel", or "Readers will".
     2. Jump straight into the premise, atmosphere, or conflict.
-    3. Keep it under 40 words.
+    3. Keep it under 40 words. 
     
     EXAMPLE for Dracula:
     "A young solicitor travels to Transylvania to finalize a property deal, only to discover his client is an ancient vampire with sights set on London."

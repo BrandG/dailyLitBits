@@ -164,8 +164,13 @@ async def admin_dashboard(request: Request, admin: str = Depends(get_current_adm
 
         # Get Book Info
         book = db.books.find_one({"book_id": sub['book_id']})
-        book_title = book['title'] if book else sub['book_id']
-        total_chunks = book.get('total_chunks', 1)
+        if book:
+            book_title = book.get('title', sub['book_id'])
+            total_chunks = book.get('total_chunks', 1)
+        else:
+            book_title = sub['book_id']
+            total_chunks = 1
+
         if total_chunks == 0: total_chunks = 1 # avoid div by zero
 
         # Calculate Progress
