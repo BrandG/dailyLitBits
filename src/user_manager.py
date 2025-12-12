@@ -13,18 +13,35 @@ class UserManager:
         self.cipher = Fernet(config.ENCRYPTION_KEY)
 
     def encrypt_email(self, email):
-        return self.cipher.encrypt(email.lower().encode())
+        return self.cipher.encrypt(email.strip().lower().encode())
+
+    def get_user_by_email(self, email):
+        """
+        Finds a user by decrypting emails. Returns user document or None.
+        """
+        target = email.lower().strip()
+        print(f"[DEBUG] Searching for email: '{target}'")
+        for user in self.db.users.find({}):
+            try:
+                decrypted_email = self.cipher.decrypt(user['email_enc']).decode()
+                # print(f"[DEBUG] Found user {user['_id']} with email: '{decrypted_email}'")
+                if decrypted_email == target:
+                    print(f"[DEBUG] Match found! ID: {user['_id']}")
+                    return user
+            except Exception as e:
+                print(f"[DEBUG] Decryption failed for user {user.get('_id')}: {e}")
+                continue # Skip bad/corrupt data
+        print("[DEBUG] No match found.")
+        return None
 
     def create_user(self, email, timezone="UTC"):
         """
         Creates a 'Ghost' user (no password, no username yet).
         """
-        # Manual (inefficient) check for existing email due to non-deterministic encryption
-        for existing_user in self.db.users.find({}):
-            decrypted_email = self.cipher.decrypt(existing_user['email_enc']).decode()
-            if decrypted_email == email.lower():
-                print(f"[DEBUG] UserManager.create_user: Duplicate email found for {email}. Raising ValueError.")
-                raise ValueError("Email already registered.")
+        # Check for existing using the new helper
+        if self.get_user_by_email(email):
+            print(f"[DEBUG] UserManager.create_user: Duplicate email found for {email}. Raising ValueError.")
+            raise ValueError("Email already registered.")
 
         encrypted_email = self.encrypt_email(email)
         

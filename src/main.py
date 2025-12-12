@@ -17,6 +17,8 @@ from datetime import datetime
 import security # Ensure this is imported
 from fastapi.staticfiles import StaticFiles
 import pymongo # Added for DuplicateKeyError
+from sendgrid import SendGridAPIClient
+from sendgrid.helpers.mail import Mail
 
 # Add this AFTER creating the app = FastAPI() line
 app = FastAPI()
@@ -52,6 +54,49 @@ async def get_db():
     finally:
         client.close()
 
+def send_welcome_email(to_email, book_title, dashboard_link, is_queue=False):
+    """Sends a welcome email with the magic link."""
+    if is_queue:
+        subject = f"Added to Queue: {book_title}"
+        body = f"""
+        <html>
+        <body style="font-family: sans-serif; padding: 20px;">
+            <h2 style="color: #2c3e50;">You're in the queue!</h2>
+            <p><strong>{book_title}</strong> has been added to your reading list.</p>
+            <p>It will start automatically once you finish your current book.</p>
+            <p><a href="{dashboard_link}" style="background-color: #28a745; color: white; padding: 10px 15px; text-decoration: none; border-radius: 5px;">Go to Dashboard</a></p>
+        </body>
+        </html>
+        """
+    else:
+        subject = f"Welcome to dailyLitBits: {book_title}"
+        body = f"""
+        <html>
+        <body style="font-family: sans-serif; padding: 20px;">
+            <h2 style="color: #2c3e50;">Welcome to dailyLitBits!</h2>
+            <p>You have successfully subscribed to <strong>{book_title}</strong>.</p>
+            <p>Your first part will arrive tomorrow morning at 6:00 AM.</p>
+            <p>You can manage your subscription, view your progress, or read ahead using your personal dashboard:</p>
+            <p><a href="{dashboard_link}" style="background-color: #28a745; color: white; padding: 10px 15px; text-decoration: none; border-radius: 5px;">Access My Dashboard</a></p>
+            <br>
+            <p style="color: #777; font-size: 12px;">(You can claim your account on the dashboard to save your history permanently.)</p>
+        </body>
+        </html>
+        """
+    
+    message = Mail(
+        from_email=config.FROM_EMAIL,
+        to_emails=to_email,
+        subject=subject,
+        html_content=body
+    )
+    try:
+        sg = SendGridAPIClient(config.SENDGRID_API_KEY)
+        sg.send(message)
+        log(f"[INFO] Welcome email sent to {to_email}")
+    except Exception as e:
+        log(f"[ERROR] Failed to send welcome email: {e}")
+
 @app.get("/", response_class=HTMLResponse)
 async def read_root(request: Request, db: MongoClient = Depends(get_db)):
     # FILTER: Only show Standard Edition (750 words) to keep the list clean
@@ -74,23 +119,47 @@ async def handle_signup(
 ):
     manager = UserManager(db)
 
-    # 1. Create User (or get existing ID if we implement check later)
-    # The create_user method returns the new _id
+    # 1. Create User (or get existing ID)
     try:
         user_id = manager.create_user(email, timezone=timezone)
-    except ValueError as e: # Catch specific ValueError for duplicate email
-        log(f"[WARN] Signup blocked for duplicate email: {email}")
-        # Return a user-friendly error page/message
-        return templates.TemplateResponse("index.html", {
-            "request": request,
-            "books": list(db.books.find({"chunk_size": 750}, {"book_id": 1, "title": 1, "author": 1, "_id": 0}).sort("title", 1)),
-            "error_message": "This email address is already registered. Please try a different one."
-        }, status_code=400)
-    except pymongo.errors.DuplicateKeyError as e: # Catch specific DuplicateKeyError
+    except ValueError:
+        # Email exists. Fetch the existing user.
+        existing_user = manager.get_user_by_email(email)
+        if not existing_user:
+             return HTMLResponse("<h1>Error: Email conflict but user not found.</h1>", status_code=500)
+        user_id = existing_user['_id']
+        log(f"[INFO] Existing user found: {user_id}. Proceeding with subscription.")
+    except pymongo.errors.DuplicateKeyError as e: 
         log(f"[ERROR] Signup Failed: {type(e).__name__}: {e}")
         return HTMLResponse("<h1>Error: Could not create user. Email might be taken.</h1>", status_code=500)
 
-    # 2. Create Subscription
+    # 2. Check for Duplicate Subscription to THIS book
+    existing_sub = db.subscriptions.find_one({
+        "user_id": user_id, 
+        "book_id": book_id,
+        "status": {"$in": ["active", "queued", "completed"]}
+    })
+    
+    if existing_sub:
+        books = list(db.books.find({}, {"book_id": 1, "title": 1, "author": 1, "_id": 0}))
+        book_info = db.books.find_one({"book_id": book_id})
+        book_title = book_info['title'] if book_info else book_id
+        
+        status_msg = existing_sub['status']
+        if status_msg == "active":
+            msg = f"You are already currently reading '{book_title}'."
+        elif status_msg == "queued":
+            msg = f"'{book_title}' is already in your queue."
+        else:
+            msg = f"You have already finished '{book_title}'."
+
+        return templates.TemplateResponse("index.html", {
+            "request": request,
+            "books": books,
+            "message": msg
+        })
+
+    # 3. Create Subscription
     # Check if user already has an active subscription
     active_subs_count = db.subscriptions.count_documents({"user_id": user_id, "status": "active"})
 
@@ -106,20 +175,29 @@ async def handle_signup(
     }
 
     try:
-        db.subscriptions.insert_one(sub_data)
+        result = db.subscriptions.insert_one(sub_data)
+        sub_id = result.inserted_id
     except Exception as e:
         log(f"[ERROR] Subscription Failed: {e}")
         return HTMLResponse("<h1>Error: Could not create subscription.</h1>", status_code=500)
 
-    # 3. Success Response
+    # 4. Success Response & Email
     books = list(db.books.find({}, {"book_id": 1, "title": 1, "author": 1, "_id": 0}))
     book_info = db.books.find_one({"book_id": book_id})
     book_title = book_info['title'] if book_info else book_id
     
+    # Generate Token for Magic Link
+    token = security.generate_binge_token(sub_id)
+    # NOTE: In production, use the actual domain from config or request.base_url
+    dashboard_link = f"https://dailylitbits.com/profile?token={token}" 
+    
+    # Send Email
+    send_welcome_email(email, book_title, dashboard_link, is_queue=(new_status == "queued"))
+
     if new_status == "queued":
-        message = f"Added '{book_title}' to your reading queue. It will start when your current book finishes."
+        message = f"Added '{book_title}' to your reading queue. Check your email for the confirmation."
     else: # new_status == "active"
-        message = f"Success! You will start receiving '{book_title}' tomorrow at 6:00 AM ({timezone})."
+        message = f"Success! You will start receiving '{book_title}' tomorrow. Check your email for your dashboard link."
 
     return templates.TemplateResponse("index.html", {
         "request": request,
@@ -451,6 +529,34 @@ async def toggle_pause(request: Request, token: str = Form(...), db: MongoClient
     # Or just re-render the profile function (cleaner is redirect, but needs token in URL)
 
     # For simplicity, we redirect back to the GET route with the token
+    return RedirectResponse(url=f"/profile?token={token}", status_code=303)
+
+@app.post("/update_preferences", response_class=HTMLResponse)
+async def update_preferences(
+    request: Request, 
+    token: str = Form(...), 
+    timezone: str = Form(...), 
+    delivery_hour: int = Form(...), 
+    db: MongoClient = Depends(get_db)
+):
+    sub_id_str = verify_binge_token(token)
+    if not sub_id_str: return HTMLResponse("Invalid Token", status_code=400)
+    
+    sub = db.subscriptions.find_one({"_id": ObjectId(sub_id_str)})
+    if not sub: return HTMLResponse("Subscription not found", status_code=404)
+    
+    # 1. Update User Timezone
+    db.users.update_one(
+        {"_id": sub['user_id']},
+        {"$set": {"timezone": timezone}}
+    )
+    
+    # 2. Update Subscription Delivery Hour
+    db.subscriptions.update_one(
+        {"_id": sub['_id']},
+        {"$set": {"delivery_hour": delivery_hour}}
+    )
+    
     return RedirectResponse(url=f"/profile?token={token}", status_code=303)
 
 # --- SUGGESTION ROUTES ---

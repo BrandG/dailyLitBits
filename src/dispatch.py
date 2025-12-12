@@ -11,13 +11,35 @@ from bson import ObjectId
 import random
 import ai
 
+def run_cron():
+    """Processes all active subscriptions for the cron job."""
+    print("Running dispatch.py in cron mode...")
+    # Find all active subscriptions
+    subscriptions = list(db.subscriptions.find({'status': 'active'}))
+    if not subscriptions:
+        print("   No active subscriptions found.")
+        return
+
+    for sub in subscriptions:
+        sub_id = str(sub['_id'])
+        success, message = process_subscription(sub_id, trigger='cron')
+        if success:
+            print(f"   Successfully dispatched for subscription {sub_id}")
+        else:
+            print(f"   Failed to dispatch for subscription {sub_id}: {message}")
+
+def run_force(sub_id):
+    """Processes a specific subscription by ID."""
+    print(f"Running dispatch.py in force mode for subscription ID: {sub_id}...")
+    success, message = process_subscription(sub_id, trigger='binge')
+    if success:
+        print(f"   Successfully dispatched for subscription {sub_id}")
+    else:
+        print(f"   Failed to dispatch for subscription {sub_id}: {message}")
+
 # --- CONFIGURATION ---
 TARGET_HOUR = 6
 BINGE_COOLDOWN_MINUTES = 5 
-
-client = MongoClient(config.MONGO_URI)
-db = client[config.DB_NAME]
-cipher = Fernet(config.ENCRYPTION_KEY)
 
 def format_email_html(title, sequence, total_chunks, content, unsub_token, binge_token, recap=None):
     html_content = content.replace('\n\n', '</p><p>').replace('\n', '<br>')
@@ -177,12 +199,19 @@ def send_via_sendgrid(to_email, subject, html_body):
         return False
 
 def process_subscription(sub_id, trigger="cron", debug=False):
+    # NOTE: 'db' and 'cipher' are now initialized in __main__ and made available globally if needed,
+    # but ideally, they should be passed as arguments or accessed via a shared context.
+    # For now, assuming they are accessible globally after __main__ initialization.
     sub = db.subscriptions.find_one({"_id": ObjectId(sub_id)})
     if not sub: return False, "Subscription not found"
     
     # We allow 'completed' status here specifically to let them re-trigger the victory email if needed
     if sub['status'] != 'active' and sub['status'] != 'completed': 
         return False, "Subscription is not active"
+
+    user_id = sub['user_id']
+    user = db.users.find_one({"_id": user_id})
+    if not user: return False, "User not found"
 
     # Rate Limit Check (Binge Only)
     if trigger == 'binge':
@@ -195,11 +224,35 @@ def process_subscription(sub_id, trigger="cron", debug=False):
                 wait_time = BINGE_COOLDOWN_MINUTES - int(diff.total_seconds() / 60)
                 return False, f"Please wait {wait_time} minutes before requesting the next chapter."
 
-    user_id = sub['user_id']
+    # Delivery Time Check (Cron Only)
+    if trigger == 'cron':
+        user_tz_str = user.get('timezone', 'UTC')
+        try:
+            user_tz = pytz.timezone(user_tz_str)
+        except pytz.UnknownTimeZoneError:
+            user_tz = pytz.UTC
+            
+        now_user_tz = datetime.now(user_tz)
+        target_hour = sub.get('delivery_hour', TARGET_HOUR) # Default to 6
+        
+        # 1. Check Hour
+        if now_user_tz.hour != target_hour:
+             return False, f"Not delivery time yet. (Current: {now_user_tz.hour}, Target: {target_hour})"
+
+        # 2. Check Frequency (Already sent today?)
+        last_sent = sub.get('last_sent')
+        if last_sent:
+            if last_sent.tzinfo is None:
+                last_sent = pytz.utc.localize(last_sent)
+            
+            last_sent_user_tz = last_sent.astimezone(user_tz)
+            
+            if last_sent_user_tz.date() == now_user_tz.date():
+                return False, "Already sent today."
+
     book_id = sub['book_id']
     seq = sub['current_sequence']
     
-    user = db.users.find_one({"_id": user_id})
     try:
         email = cipher.decrypt(user['email_enc']).decode()
     except Exception:
@@ -225,6 +278,20 @@ def process_subscription(sub_id, trigger="cron", debug=False):
         total_words = result[0]['total_words'] if result else 0
 
         print(f"    [Victory] Generating smart recommendations for {user_id}...")
+
+        # A. Determine which books the user has already read (by parent_id)
+        # Find all completed subscriptions for the user
+        completed_subs = db.subscriptions.find({"user_id": user_id, "status": "completed"})
+        completed_book_ids = [sub['book_id'] for sub in completed_subs]
+
+        # Get the parent_ids for all completed books
+        read_parent_ids_cursor = db.books.find({"book_id": {"$in": completed_book_ids}}, {"parent_id": 1})
+        read_parent_ids = {b['parent_id'] for b in read_parent_ids_cursor if 'parent_id' in b}
+
+        # Also add the parent_id of the book just finished
+        current_book_info = db.books.find_one({"book_id": book_id})
+        if current_book_info and 'parent_id' in current_book_info:
+            read_parent_ids.add(current_book_info['parent_id'])
         
         # B. Get Titles of Read Books (for the AI Prompt)
         # We just need a list of titles like ["Dracula", "Frankenstein"]
@@ -295,7 +362,10 @@ def process_subscription(sub_id, trigger="cron", debug=False):
 
         # F. Send Victory Email
         switch_token = security.generate_binge_token(sub_id)
-        book_title = curr_book['title'] if curr_book else "Your Book"
+        # 'curr_book' is still not defined here, this will cause a NameError.
+        # I will assume 'curr_book' should be fetched for the current subscription.
+        current_book_info = db.books.find_one({"book_id": book_id})
+        book_title = current_book_info['title'] if current_book_info else "Your Book" 
         subject = f"You finished {book_title}!"
 
         # --- MODIFY VICTORY EMAIL CONTENT ---        
@@ -304,4 +374,119 @@ def process_subscription(sub_id, trigger="cron", debug=False):
             victory_message += f"<p style=\"margin-top: 20px;\">Your next book, <strong>{next_book_title}</strong>, will start arriving tomorrow!</p>"
         
         html_body = format_victory_email(book_title, days_taken, total_words, suggestions, switch_token, additional_message=victory_message)
-        # ------------------------------------
+        if send_via_sendgrid(email, subject, html_body):
+            db.subscriptions.update_one(
+                {"_id": ObjectId(sub_id)},
+                {"$set": {"status": "completed", "last_sent": datetime.now(pytz.utc)}}
+            )
+            return True, "Victory email sent."
+        else:
+            return False, "Failed to send victory email."
+    
+    # --- REGULAR DISPATCH LOGIC ---
+    if not chunk:
+        # This case should ideally not be reached if victory logic is correct,
+        # but as a safeguard, we mark subscription complete if no chunk found
+        db.subscriptions.update_one(
+            {"_id": ObjectId(sub_id)},
+            {"$set": {"status": "completed"}}
+        )
+        return False, "No chunk found for current sequence. Subscription marked completed."
+
+    # Fetch total chunks for progress display
+    total_chunks = db.chunks.count_documents({"book_id": book_id})
+
+    # Generate tokens for unsubscribe and binge reading
+    unsub_token = security.generate_unsub_token(email)
+    binge_token = security.generate_binge_token(sub_id)
+
+    # Get recap if not the first chunk
+    recap_text = None
+    if seq > 1:
+        prev_chunk = db.chunks.find_one({"book_id": book_id, "sequence": seq - 1})
+        if prev_chunk:
+            print(f"    [AI] Generating recap for chunk {seq} of {book_id}...")
+            recap_text = ai.generate_recap(prev_chunk['content'])
+
+    # Format and send email
+    current_book_info = db.books.find_one({"book_id": book_id})
+    book_title = current_book_info['title'] if current_book_info else "dailyLitBits"
+    subject = f"dailyLitBits: {book_title} (Part {seq}/{total_chunks})"
+    
+    html_body = format_email_html(
+        book_title, seq, total_chunks, chunk['content'], unsub_token, binge_token, recap_text
+    )
+
+    if send_via_sendgrid(email, subject, html_body):
+        # Update subscription for next dispatch
+        db.subscriptions.update_one(
+            {"_id": ObjectId(sub_id)},
+            {
+                "$inc": {"current_sequence": 1},
+                "$set": {"last_sent": datetime.now(pytz.utc)}
+            }
+        )
+        return True, "Email dispatched successfully."
+    else:
+        return False, "Failed to send email."
+
+
+# --- Database and Cipher Initialization Functions ---
+def initialize_db():
+    """Initializes and returns the MongoDB client and db object."""
+    try:
+        client = MongoClient(config.MONGO_URI)
+        # The ismaster command is cheap and does not require auth.
+        client.admin.command('ismaster') 
+        db = client[config.DB_NAME]
+        print("MongoDB connection established successfully.")
+        return client, db
+    except Exception as e:
+        print(f"   [ERROR] Failed to connect to MongoDB: {e}")
+        # Raise the exception to stop execution if DB connection fails
+        raise
+
+def initialize_cipher():
+    """Initializes and returns the Fernet cipher."""
+    try:
+        cipher = Fernet(config.ENCRYPTION_KEY)
+        print("Fernet cipher initialized successfully.")
+        return cipher
+    except Exception as e:
+        print(f"   [ERROR] Failed to initialize Fernet cipher: {e}")
+        # Raise the exception to stop execution if cipher fails
+        raise
+
+if __name__ == "__main__":
+    # Initialize DB and Cipher here
+    try:
+        # These are now available globally within this script's execution context
+        client, db = initialize_db() 
+        cipher = initialize_cipher()
+    except Exception as e:
+        # If initialization fails, exit.
+        print(f"Critical initialization failed: {e}")
+        exit(1) # Exit with an error code
+
+    parser = argparse.ArgumentParser(description="Dispatch emails for dailyLitBits.")
+    subparsers = parser.add_subparsers(dest='command', help='Command to execute')
+
+    # Subparser for the 'cron' command (default behavior)
+    parser_cron = subparsers.add_parser('cron', help='Run dispatch for all active subscriptions (default).')
+    parser_cron.set_defaults(func=run_cron)
+
+    # Subparser for the 'force' command
+    parser_force = subparsers.add_parser('force', help='Force dispatch for a specific subscription ID.')
+    parser_force.add_argument('sub_id', type=str, help='The ID of the subscription to force dispatch for.')
+    parser_force.set_defaults(func=lambda args: run_force(args.sub_id))
+
+    args = parser.parse_args()
+
+    # If no command is specified, default to 'cron'
+    if hasattr(args, 'command') and args.command is None:
+        run_cron()
+    elif hasattr(args, 'func'):
+        args.func(args)
+    else:
+        # Fallback if no command is recognized or if help is implicitly shown
+        parser.print_help()
