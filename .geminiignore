@@ -1,0 +1,31 @@
+# --- Python Basics ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# --- Virtual Environments (Crucial) ---
+# These contain thousands of library files the CLI tries to read
+venv/
+.venv/
+env/
+.env
+
+# --- Lock Files ---
+# These are huge text files that burn quota fast
+poetry.lock
+Pipfile.lock
+
+# --- Project Specific (DailyLitBits) ---
+# Since you are parsing books, don't let the CLI read your data directory
+# or it will try to send Moby Dick to the API every time you ask a coding question.
+/data/
+*.txt
+*.epub
+*.pdf
+*.csv
+
+# --- System/Logs ---
+.git/
+.DS_Store
+*.log
