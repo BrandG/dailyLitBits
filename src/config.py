@@ -15,7 +15,10 @@ if not key:
 ENCRYPTION_KEY = key.encode() # Convert string back to bytes
 
 # Email
-SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
-FROM_EMAIL = os.getenv("FROM_EMAIL")
+SMTP_HOST = os.getenv("SMTP_SERVER", "smtp-relay.brevo.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", 2525))
+SMTP_USER = os.getenv("SMTP_USER")
+SMTP_PASS = os.getenv("SMTP_PASSWORD")
+FROM_EMAIL = os.getenv("EMAIL_SENDER")
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")

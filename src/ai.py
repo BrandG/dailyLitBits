@@ -1,32 +1,32 @@
-import google.generativeai as genai
-from google.generativeai import types
+from google import genai
+from google.genai import types
 import config
 import time
 import random
-from google.api_core import exceptions
 import json
 import re
 
-GENAI_MODEL_NAME = 'gemini-flash-latest' 
-# Setup
-if config.GEMINI_API_KEY:
-    genai.configure(api_key=config.GEMINI_API_KEY)
+# Use the recommended model name for the new SDK
+GENAI_MODEL_NAME = 'gemini-2.0-flash' 
 
-SAFETY_SETTINGS = {
-    types.HarmCategory.HARM_CATEGORY_HARASSMENT: types.HarmBlockThreshold.BLOCK_NONE,
-    types.HarmCategory.HARM_CATEGORY_HATE_SPEECH: types.HarmBlockThreshold.BLOCK_NONE,
-    types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: types.HarmBlockThreshold.BLOCK_NONE,
-    types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: types.HarmBlockThreshold.BLOCK_NONE,
-    #types.HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY: types.HarmBlockThreshold.BLOCK_NONE,
-}
+# Initialize client if API key is present
+client = None
+if config.GEMINI_API_KEY:
+    client = genai.Client(api_key=config.GEMINI_API_KEY)
+
+# Define safety settings for the new SDK
+SAFETY_SETTINGS = [
+    types.SafetySetting(category='HARM_CATEGORY_HARASSMENT', threshold='BLOCK_NONE'),
+    types.SafetySetting(category='HARM_CATEGORY_HATE_SPEECH', threshold='BLOCK_NONE'),
+    types.SafetySetting(category='HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold='BLOCK_NONE'),
+    types.SafetySetting(category='HARM_CATEGORY_DANGEROUS_CONTENT', threshold='BLOCK_NONE'),
+]
 
 def generate_recap(current_text_chunk, previous_recap=None):
-    if not config.GEMINI_API_KEY:
-        print("   [AI Error] No GEMINI_API_KEY found.")
+    if not client:
+        print("   [AI Error] No GEMINI_API_KEY found or client not initialized.")
         return None
 
-    model = genai.GenerativeModel(GENAI_MODEL_NAME)
-    
     # Prepare Prompt
     if not previous_recap:
         prompt = f"""
@@ -58,31 +58,38 @@ def generate_recap(current_text_chunk, previous_recap=None):
         - Start with "Previously:" or just the summary.
         """
 
-    # --- NEW: RETRY LOGIC ---
+    # --- RETRY LOGIC ---
     max_retries = 5
     base_delay = 5 # seconds
 
     for attempt in range(max_retries):
         try:
-            response = model.generate_content(prompt,safety_settings=SAFETY_SETTINGS, request_options={'timeout': 60})
-            if not response.parts:
-                raise ValueError("Model returned empty response (Ghost Output)")
+            response = client.models.generate_content(
+                model=GENAI_MODEL_NAME,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    safety_settings=SAFETY_SETTINGS,
+                    # timeout is set differently in the new SDK or managed by the client
+                )
+            )
+            
+            if not response.text:
+                raise ValueError("Model returned empty response")
 
             return response.text.strip()
             
-        except exceptions.ResourceExhausted as e:
-            # 1. ADD JITTER: Wait base_delay + random(0-3s)
-            jitter = random.uniform(0, 3)
-            wait_time = (base_delay * (2 ** attempt)) + jitter
-            # 2. PRINT REAL ERROR: We need to see if it mentions "Day" or "Minute"
-            print(f"   [429 Hit] {e}") 
-            print(f"   -> Cooling down for {wait_time:.2f}s...")
-            time.sleep(wait_time)
-            
         except Exception as e:
-            # 504s and "Invalid operation" errors will be caught here and retried
-            print(f"   [AI Error] Attempt {attempt+1} failed: {e}")
-            time.sleep(2) # Short pause before retry 
+            # Check for rate limiting or other retriable errors
+            error_str = str(e).lower()
+            if "429" in error_str or "resource_exhausted" in error_str:
+                jitter = random.uniform(0, 3)
+                wait_time = (base_delay * (2 ** attempt)) + jitter
+                print(f"   [429 Hit] {e}") 
+                print(f"   -> Cooling down for {wait_time:.2f}s...")
+                time.sleep(wait_time)
+            else:
+                print(f"   [AI Error] Attempt {attempt+1} failed: {e}")
+                time.sleep(2) 
     
     print("   [AI Error] Max retries exceeded.")
     return None
@@ -92,13 +99,10 @@ def get_recommendations(read_titles, available_books):
     Asks Gemini to pick 3 books from 'available_books' based on 'read_titles'.
     Returns a list of 3 book_ids.
     """
-    if not config.GEMINI_API_KEY:
+    if not client:
         return []
 
-    model = genai.GenerativeModel(GENAI_MODEL_NAME)
-
     # Convert available books to a lightweight text list for the prompt
-    # Format: "ID: Title by Author"
     library_text = ""
     for b in available_books:
         library_text += f"{b['id']}: {b['title']} by {b['author']}\n"
@@ -122,7 +126,10 @@ def get_recommendations(read_titles, available_books):
     """
 
     try:
-        response = model.generate_content(prompt)
+        response = client.models.generate_content(
+            model=GENAI_MODEL_NAME,
+            contents=prompt
+        )
         text = response.text.strip()
 
         # Cleanup: Remove markdown code blocks if Gemini adds them
@@ -135,3 +142,4 @@ def get_recommendations(read_titles, available_books):
     except Exception as e:
         print(f"   [AI Recommendation Error] {e}")
         return []
+

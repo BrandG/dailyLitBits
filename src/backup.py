@@ -13,6 +13,28 @@ CONTAINER_NAME = "mongo"
 # How many days to keep backups before deleting old ones
 RETENTION_DAYS = 3
 
+def get_actual_container_name():
+    """Attempts to find the actual container name if the default fails."""
+    # First check if the default works
+    check_cmd = ["docker", "inspect", CONTAINER_NAME]
+    if subprocess.run(check_cmd, capture_output=True).returncode == 0:
+        return CONTAINER_NAME
+    
+    # If not, try to find it by labels
+    log(f"Container '{CONTAINER_NAME}' not found. Searching by labels...")
+    find_cmd = [
+        "docker", "ps", "--filter", "label=com.docker.compose.service=mongo",
+        "--format", "{{.Names}}"
+    ]
+    result = subprocess.run(find_cmd, capture_output=True, text=True)
+    names = result.stdout.strip().split('\n')
+    
+    if names and names[0]:
+        log(f"Found container: {names[0]}")
+        return names[0]
+    
+    return CONTAINER_NAME # Fallback to original
+
 def create_backup():
     # 1. Ensure directory exists
     if not os.path.exists(BACKUP_DIR):
@@ -27,13 +49,10 @@ def create_backup():
     log(f"Starting backup: {filename}...")
 
     # 3. Run mongodump via Docker
-    # We pipe stdout from the container directly to a file on the host
-    # Command: docker exec mongo mongodump --archive --gzip
+    actual_name = get_actual_container_name()
     try:
         with open(filepath, "wb") as f:
-            # Note: We do NOT need a URI here because we are executing 
-            # inside the container, so it defaults to localhost:27017 (which is correct inside)
-            cmd = ["docker", "exec", CONTAINER_NAME, "mongodump", "--archive", "--gzip"]
+            cmd = ["docker", "exec", actual_name, "mongodump", "--db", "slow_reader_db", "--archive", "--gzip"]
             
             process = subprocess.run(cmd, stdout=f, stderr=subprocess.PIPE)
             

@@ -1,8 +1,8 @@
 import argparse
 from pymongo import MongoClient
 from cryptography.fernet import Fernet
-from sendgrid import SendGridAPIClient
-from sendgrid.helpers.mail import Mail
+# from sendgrid import SendGridAPIClient  <-- Removed
+# from sendgrid.helpers.mail import Mail <-- Removed
 from datetime import datetime, timedelta
 import pytz
 import config
@@ -10,6 +10,10 @@ import security
 from bson import ObjectId
 import random
 import ai
+
+# Global placeholders for database and cipher, to be initialized either by __main__ or passed in.
+db = None
+cipher = None
 
 def run_cron():
     """Processes all active subscriptions for the cron job."""
@@ -184,25 +188,50 @@ def format_victory_email(book_title, days_taken, word_count, suggestions, switch
     """
     return template
 
-def send_via_sendgrid(to_email, subject, html_body):
-    message = Mail(
-        from_email=config.FROM_EMAIL,
-        to_emails=to_email,
-        subject=subject,
-        html_content=html_body)
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
+def send_via_brevo(to_email, subject, html_body):
+    """Sends an email via Brevo SMTP."""
+    msg = MIMEMultipart()
+    msg['From'] = config.FROM_EMAIL
+    msg['To'] = to_email
+    msg['Subject'] = subject
+
+    msg.attach(MIMEText(html_body, 'html'))
+
+    port = config.SMTP_PORT
+
     try:
-        sg = SendGridAPIClient(config.SENDGRID_API_KEY)
-        response = sg.send(message)
-        return response.status_code == 202
+        with smtplib.SMTP(config.SMTP_HOST, port) as server:
+            server.set_debuglevel(0)  # Set to 1 for verbose SMTP debugging
+            server.starttls()
+            server.login(config.SMTP_USER, config.SMTP_PASS)
+            server.send_message(msg)
+        return True
+    except smtplib.SMTPAuthenticationError as e:
+        print(f"   [ERROR] SMTP Authentication failed: {e}")
+        print(f"   [INFO] Check that SMTP_USER is your Brevo account email and SMTP_PASS is your SMTP API key (not account password)")
+        return False
+    except smtplib.SMTPException as e:
+        print(f"   [ERROR] SMTP error: {e}")
+        return False
     except Exception as e:
-        print(f"   [ERROR] SendGrid failed: {e}")
+        print(f"   [ERROR] Unexpected error sending email: {e}")
         return False
 
-def process_subscription(sub_id, trigger="cron", debug=False):
-    # NOTE: 'db' and 'cipher' are now initialized in __main__ and made available globally if needed,
-    # but ideally, they should be passed as arguments or accessed via a shared context.
-    # For now, assuming they are accessible globally after __main__ initialization.
-    sub = db.subscriptions.find_one({"_id": ObjectId(sub_id)})
+def process_subscription(sub_id, trigger="cron", debug=False, db_session=None, cipher_obj=None):
+    # Use provided db/cipher or fall back to globals (for CLI usage)
+    local_db = db_session if db_session is not None else db
+    local_cipher = cipher_obj if cipher_obj is not None else cipher
+
+    if local_db is None:
+        return False, "Database not initialized"
+    if local_cipher is None:
+        return False, "Cipher not initialized"
+
+    sub = local_db.subscriptions.find_one({"_id": ObjectId(sub_id)})
     if not sub: return False, "Subscription not found"
     
     # We allow 'completed' status here specifically to let them re-trigger the victory email if needed
@@ -210,7 +239,7 @@ def process_subscription(sub_id, trigger="cron", debug=False):
         return False, "Subscription is not active"
 
     user_id = sub['user_id']
-    user = db.users.find_one({"_id": user_id})
+    user = local_db.users.find_one({"_id": user_id})
     if not user: return False, "User not found"
 
     # Rate Limit Check (Binge Only)
@@ -254,11 +283,11 @@ def process_subscription(sub_id, trigger="cron", debug=False):
     seq = sub['current_sequence']
     
     try:
-        email = cipher.decrypt(user['email_enc']).decode()
+        email = local_cipher.decrypt(user['email_enc']).decode()
     except Exception:
         return False, "Decryption failed"
 
-    chunk = db.chunks.find_one({"book_id": book_id, "sequence": seq})
+    chunk = local_db.chunks.find_one({"book_id": book_id, "sequence": seq})
     
     # --- VICTORY LOGIC ---
     if not chunk:
@@ -274,32 +303,32 @@ def process_subscription(sub_id, trigger="cron", debug=False):
             {"$match": {"book_id": book_id}},
             {"$group": {"_id": None, "total_words": {"$sum": "$word_count"}}}
         ]
-        result = list(db.chunks.aggregate(pipeline))
+        result = list(local_db.chunks.aggregate(pipeline))
         total_words = result[0]['total_words'] if result else 0
 
         print(f"    [Victory] Generating smart recommendations for {user_id}...")
 
         # A. Determine which books the user has already read (by parent_id)
         # Find all completed subscriptions for the user
-        completed_subs = db.subscriptions.find({"user_id": user_id, "status": "completed"})
+        completed_subs = local_db.subscriptions.find({"user_id": user_id, "status": "completed"})
         completed_book_ids = [sub['book_id'] for sub in completed_subs]
 
         # Get the parent_ids for all completed books
-        read_parent_ids_cursor = db.books.find({"book_id": {"$in": completed_book_ids}}, {"parent_id": 1})
+        read_parent_ids_cursor = local_db.books.find({"book_id": {"$in": completed_book_ids}}, {"parent_id": 1})
         read_parent_ids = {b['parent_id'] for b in read_parent_ids_cursor if 'parent_id' in b}
 
         # Also add the parent_id of the book just finished
-        current_book_info = db.books.find_one({"book_id": book_id})
+        current_book_info = local_db.books.find_one({"book_id": book_id})
         if current_book_info and 'parent_id' in current_book_info:
             read_parent_ids.add(current_book_info['parent_id'])
         
         # B. Get Titles of Read Books (for the AI Prompt)
         # We just need a list of titles like ["Dracula", "Frankenstein"]
-        read_titles = db.books.distinct("title", {"parent_id": {"$in": list(read_parent_ids)}})
+        read_titles = local_db.books.distinct("title", {"parent_id": {"$in": list(read_parent_ids)}})
 
         # C. Fetch Available Library (Only 'standard' edition candidates, excluding read ones)
         # We filter by parent_id not being in our read list
-        available_cursor = db.books.find(
+        available_cursor = local_db.books.find(
             {
                 "parent_id": {"$nin": list(read_parent_ids)},
                 "chunk_size": 750 # Only recommend Standard editions to keep list clean
@@ -323,12 +352,12 @@ def process_subscription(sub_id, trigger="cron", debug=False):
 
             if recommended_ids:
                 # Fetch the full book objects for the IDs returned by AI
-                suggestions = list(db.books.find({"book_id": {"$in": recommended_ids}}))
+                suggestions = list(local_db.books.find({"book_id": {"$in": recommended_ids}}))
 
         # E. Fallback (If AI fails or returns nothing, use random)
         if not suggestions:
             print("   [Victory] AI failed or no result. Falling back to random.")
-            suggestions = list(db.books.aggregate([
+            suggestions = list(local_db.books.aggregate([
                 {"$match": {
                     "parent_id": {"$nin": list(read_parent_ids)},
                     "chunk_size": 750
@@ -337,7 +366,7 @@ def process_subscription(sub_id, trigger="cron", debug=False):
             ]))
         
         # --- ACTIVATE NEXT QUEUED BOOK ---
-        next_queued_sub = db.subscriptions.find_one(
+        next_queued_sub = local_db.subscriptions.find_one(
             {"user_id": user_id, "status": "queued"},
             sort=[("created_at", 1)] # Get the oldest one
         )
@@ -345,7 +374,7 @@ def process_subscription(sub_id, trigger="cron", debug=False):
         next_book_title = None
         if next_queued_sub:
             print(f"   [Victory] Activating next queued book for {user_id}: {next_queued_sub['book_id']}")
-            db.subscriptions.update_one(
+            local_db.subscriptions.update_one(
                 {"_id": next_queued_sub['_id']},
                 {"$set": {
                     "status": "active", 
@@ -355,16 +384,14 @@ def process_subscription(sub_id, trigger="cron", debug=False):
                 }}
             )
             # Fetch title for email notification
-            next_book_info = db.books.find_one({"book_id": next_queued_sub['book_id']})
+            next_book_info = local_db.books.find_one({"book_id": next_queued_sub['book_id']})
             if next_book_info:
                 next_book_title = next_book_info['title']
         # --------------------------------
 
         # F. Send Victory Email
         switch_token = security.generate_binge_token(sub_id)
-        # 'curr_book' is still not defined here, this will cause a NameError.
-        # I will assume 'curr_book' should be fetched for the current subscription.
-        current_book_info = db.books.find_one({"book_id": book_id})
+        current_book_info = local_db.books.find_one({"book_id": book_id})
         book_title = current_book_info['title'] if current_book_info else "Your Book" 
         subject = f"You finished {book_title}!"
 
@@ -374,8 +401,8 @@ def process_subscription(sub_id, trigger="cron", debug=False):
             victory_message += f"<p style=\"margin-top: 20px;\">Your next book, <strong>{next_book_title}</strong>, will start arriving tomorrow!</p>"
         
         html_body = format_victory_email(book_title, days_taken, total_words, suggestions, switch_token, additional_message=victory_message)
-        if send_via_sendgrid(email, subject, html_body):
-            db.subscriptions.update_one(
+        if send_via_brevo(email, subject, html_body):
+            local_db.subscriptions.update_one(
                 {"_id": ObjectId(sub_id)},
                 {"$set": {"status": "completed", "last_sent": datetime.now(pytz.utc)}}
             )
@@ -387,14 +414,14 @@ def process_subscription(sub_id, trigger="cron", debug=False):
     if not chunk:
         # This case should ideally not be reached if victory logic is correct,
         # but as a safeguard, we mark subscription complete if no chunk found
-        db.subscriptions.update_one(
+        local_db.subscriptions.update_one(
             {"_id": ObjectId(sub_id)},
             {"$set": {"status": "completed"}}
         )
         return False, "No chunk found for current sequence. Subscription marked completed."
 
     # Fetch total chunks for progress display
-    total_chunks = db.chunks.count_documents({"book_id": book_id})
+    total_chunks = local_db.chunks.count_documents({"book_id": book_id})
 
     # Generate tokens for unsubscribe and binge reading
     unsub_token = security.generate_unsub_token(email)
@@ -403,13 +430,13 @@ def process_subscription(sub_id, trigger="cron", debug=False):
     # Get recap if not the first chunk
     recap_text = None
     if seq > 1:
-        prev_chunk = db.chunks.find_one({"book_id": book_id, "sequence": seq - 1})
+        prev_chunk = local_db.chunks.find_one({"book_id": book_id, "sequence": seq - 1})
         if prev_chunk:
             print(f"    [AI] Generating recap for chunk {seq} of {book_id}...")
             recap_text = ai.generate_recap(prev_chunk['content'])
 
     # Format and send email
-    current_book_info = db.books.find_one({"book_id": book_id})
+    current_book_info = local_db.books.find_one({"book_id": book_id})
     book_title = current_book_info['title'] if current_book_info else "dailyLitBits"
     subject = f"dailyLitBits: {book_title} (Part {seq}/{total_chunks})"
     
@@ -417,9 +444,9 @@ def process_subscription(sub_id, trigger="cron", debug=False):
         book_title, seq, total_chunks, chunk['content'], unsub_token, binge_token, recap_text
     )
 
-    if send_via_sendgrid(email, subject, html_body):
+    if send_via_brevo(email, subject, html_body):
         # Update subscription for next dispatch
-        db.subscriptions.update_one(
+        local_db.subscriptions.update_one(
             {"_id": ObjectId(sub_id)},
             {
                 "$inc": {"current_sequence": 1},

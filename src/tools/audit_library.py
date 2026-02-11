@@ -4,7 +4,7 @@ import sys
 import json
 import time
 from pymongo import MongoClient
-import google.generativeai as genai
+from google import genai
 
 # --- PATH SETUP ---
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -13,21 +13,22 @@ sys.path.append(PROJECT_ROOT)
 import config
 
 # --- CONFIG ---
-# Use the stable model
-GENAI_MODEL_NAME = 'models/gemini-flash-latest' 
+GENAI_MODEL_NAME = 'gemini-2.0-flash' 
 
-client = MongoClient(config.MONGO_URI)
-db = client[config.DB_NAME]
+client_db = MongoClient(config.MONGO_URI)
+db = client_db[config.DB_NAME]
 
+ai_client = None
 if config.GEMINI_API_KEY:
-    genai.configure(api_key=config.GEMINI_API_KEY)
+    ai_client = genai.Client(api_key=config.GEMINI_API_KEY)
 
 def check_consistency(title, author, description):
     """
     Asks AI if the description matches the title.
     Returns: (is_match: bool, new_blurb: str|None)
     """
-    model = genai.GenerativeModel(GENAI_MODEL_NAME)
+    if not ai_client:
+        return None, "No AI client", None
     
     prompt = f"""
     You are a data integrity auditor for a library.
@@ -53,7 +54,14 @@ def check_consistency(title, author, description):
     """
     
     try:
-        response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+        from google.genai import types
+        response = ai_client.models.generate_content(
+            model=GENAI_MODEL_NAME,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json"
+            )
+        )
         data = json.loads(response.text)
         return data.get("match"), data.get("reason"), data.get("corrected_blurb")
     except Exception as e:

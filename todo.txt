@@ -23,3 +23,5 @@ DailyLitBits Roadmap
 - Instead of a dropdown on the main page, we should find a way to use the library code. Perhaps we make it like an openable section on the main page that shows all the books as tiles.
 
 - Instead of starting a user over at the beginning of a book every time they switch editions, find a way to get the current position (the last hundred characters of their most current chunk), find that same position in the new edition, and set the user's chunk position to that.
+
+- When I'm signed in, looking at my profile, I see the "log in" button in the title bar.

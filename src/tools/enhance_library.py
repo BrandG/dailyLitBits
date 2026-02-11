@@ -3,7 +3,7 @@ import os
 import shutil
 import time
 from pymongo import MongoClient
-import google.generativeai as genai
+from google import genai
 import sys
 
 # 1. PATH SETUP (Robust)
@@ -18,16 +18,16 @@ import config
 
 # --- CONFIGURATION ---
 COVER_DIR = "static/covers"
-# Use the model available in your list
-GENAI_MODEL_NAME = 'models/gemini-flash-latest' 
+GENAI_MODEL_NAME = 'gemini-2.0-flash' 
 
 # Connect to DB
-client = MongoClient(config.MONGO_URI)
-db = client[config.DB_NAME]
+client_db = MongoClient(config.MONGO_URI)
+db = client_db[config.DB_NAME]
 
 # Configure AI
+ai_client = None
 if config.GEMINI_API_KEY:
-    genai.configure(api_key=config.GEMINI_API_KEY)
+    ai_client = genai.Client(api_key=config.GEMINI_API_KEY)
 
 def download_cover(book_id):
     """
@@ -77,11 +77,9 @@ def generate_blurb(title, author):
     """
     Asks Gemini to write a short hook for the book.
     """
-    if not config.GEMINI_API_KEY:
+    if not ai_client:
         return None
 
-    model = genai.GenerativeModel(GENAI_MODEL_NAME)
-    
     prompt = f"""
     You are a bookstore curator. Write a short, enticing "hook" description (max 2 sentences) for the book "{title}" by {author}.
     
@@ -95,7 +93,10 @@ def generate_blurb(title, author):
     """
     
     try:
-        response = model.generate_content(prompt)
+        response = ai_client.models.generate_content(
+            model=GENAI_MODEL_NAME,
+            contents=prompt
+        )
         return response.text.strip()
     except Exception as e:
         print(f"   [AI] Error generating blurb: {e}")

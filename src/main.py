@@ -17,8 +17,8 @@ from datetime import datetime
 import security # Ensure this is imported
 from fastapi.staticfiles import StaticFiles
 import pymongo # Added for DuplicateKeyError
-from sendgrid import SendGridAPIClient
-from sendgrid.helpers.mail import Mail
+# from sendgrid import SendGridAPIClient <-- Removed
+# from sendgrid.helpers.mail import Mail <-- Removed
 
 # Add this AFTER creating the app = FastAPI() line
 app = FastAPI()
@@ -84,18 +84,10 @@ def send_welcome_email(to_email, book_title, dashboard_link, is_queue=False):
         </html>
         """
     
-    message = Mail(
-        from_email=config.FROM_EMAIL,
-        to_emails=to_email,
-        subject=subject,
-        html_content=body
-    )
-    try:
-        sg = SendGridAPIClient(config.SENDGRID_API_KEY)
-        sg.send(message)
+    if dispatch.send_via_brevo(to_email, subject, body):
         log(f"[INFO] Welcome email sent to {to_email}")
-    except Exception as e:
-        log(f"[ERROR] Failed to send welcome email: {e}")
+    else:
+        log(f"[ERROR] Failed to send welcome email to {to_email}")
 
 @app.get("/", response_class=HTMLResponse)
 async def read_root(request: Request, db: MongoClient = Depends(get_db)):
@@ -212,7 +204,7 @@ async def trigger_next_chapter(request: Request, token: str, db: MongoClient = D
     if not sub_id_str:
         return HTMLResponse(content="<h1>Invalid or Expired Link</h1>", status_code=400)
     
-    success, msg = dispatch.process_subscription(sub_id_str, trigger='binge')
+    success, msg = dispatch.process_subscription(sub_id_str, trigger='binge', db_session=db, cipher_obj=cipher)
     
     color = "#28a745" if success else "#dc3545"
     

@@ -13,7 +13,7 @@ dailyLitBits is a Python-based web application that delivers daily literature ex
 -   **Containerization:** Docker (`docker-compose`)
 -   **Testing:** `pytest` with `httpx`
 -   **AI Integration:** Google Gemini API (for summaries, recommendations, and blurbs)
--   **Email Delivery:** SendGrid
+-   **Email Delivery:** Brevo
 -   **Frontend:** HTML with Jinja2 templating
 
 ## 3. Project Structure

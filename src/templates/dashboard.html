@@ -1,26 +1,33 @@
 <!DOCTYPE html>
 <html>
+
 <head>
     <title>My Dashboard - DailyLitBits</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <style>
-        .progress { height: 25px; font-size: 0.9rem; }
-        .card-header { background-color: #2c3e50; color: white; }
-        .last-child-no-border:last-child { border-bottom: 0 !important; }
+        .progress {
+            height: 25px;
+            font-size: 0.9rem;
+        }
+
+        .card-header {
+            background-color: #2c3e50;
+            color: white;
+        }
+
+        .last-child-no-border:last-child {
+            border-bottom: 0 !important;
+        }
     </style>
 </head>
+
 <body class="bg-light">
-    <nav class="navbar navbar-light bg-white shadow-sm mb-4">
-        <div class="container">
-            <a class="navbar-brand fw-bold text-success" href="/">DailyLitBits</a>
-            <span class="text-muted">Welcome, {{ username }}</span>
-        </div>
-    </nav>
+    {% include 'header.html' %}
 
     <div class="container">
         <div class="row justify-content-center">
             <div class="col-md-8">
-                
+
                 <!-- CARD 1: CURRENTLY READING -->
                 <div class="card shadow-sm mb-4">
                     <div class="card-header">
@@ -29,13 +36,13 @@
                     <div class="card-body">
                         <h3>{{ book_title }}</h3>
                         <p class="text-muted">by {{ book_author }}</p>
-                        
+
                         <div class="progress mb-3">
                             <div class="progress-bar bg-success" role="progressbar" style="width: {{ percent }}%;">
                                 Part {{ current }} of {{ total }}
                             </div>
                         </div>
-                        
+
                         <div class="d-flex justify-content-between text-muted small">
                             <span>Started: {{ start_date }}</span>
                             <span>{{ percent }}% Complete</span>
@@ -51,14 +58,15 @@
                     </div>
                     <div class="card-body">
                         {% for book in queued_books %}
-                        <div class="d-flex justify-content-between align-items-center mb-3 pb-3 border-bottom last-child-no-border">
+                        <div
+                            class="d-flex justify-content-between align-items-center mb-3 pb-3 border-bottom last-child-no-border">
                             <div>
                                 <strong class="d-block">{{ book.title }}</strong>
                                 <span class="text-muted small">by {{ book.author }}</span>
                             </div>
                             <div>
-                                <a href="/switch_book?token={{ token }}&new_book_id={{ book.book_id }}" 
-                                   class="btn btn-sm btn-outline-primary">
+                                <a href="/switch_book?token={{ token }}&new_book_id={{ book.book_id }}"
+                                    class="btn btn-sm btn-outline-primary">
                                     Start Reading
                                 </a>
                                 <!-- Bonus: Remove button - would need a new route/form -->
@@ -74,74 +82,87 @@
                 <div class="card shadow-sm mb-4">
                     <div class="card-body">
                         <h5 class="card-title mb-3">Reading Speed</h5>
-                        
+
                         <p class="small text-muted">
                             Current Edition: <strong>{{ edition_label }}</strong><br>
-                            <span class="text-danger">Warning: Changing speeds will reset your progress to Part 1.</span>
+                            <span class="text-danger">Warning: Changing speeds will reset your progress to Part
+                                1.</span>
                         </p>
 
                         <form action="/change_edition" method="post" class="row g-2 align-items-center">
                             <input type="hidden" name="token" value="{{ token }}">
-                            
+
                             <div class="col-auto">
                                 <select name="target_edition" class="form-select form-select-sm">
-                                    <option value="short" {% if current_edition == 'short' %}selected{% endif %}>Short (~325 words)</option>
-                                    <option value="standard" {% if current_edition == 'standard' %}selected{% endif %}>Standard (~750 words)</option>
-                                    <option value="long" {% if current_edition == 'long' %}selected{% endif %}>Long (~1500 words)</option>
+                                    <option value="short" {% if current_edition=='short' %}selected{% endif %}>Short
+                                        (~325 words)</option>
+                                    <option value="standard" {% if current_edition=='standard' %}selected{% endif %}>
+                                        Standard (~750 words)</option>
+                                    <option value="long" {% if current_edition=='long' %}selected{% endif %}>Long (~1500
+                                        words)</option>
                                 </select>
                             </div>
-                            
+
                             <div class="col-auto">
-                                <button type="submit" class="btn btn-sm btn-outline-danger" onclick="return confirm('Are you sure? This will restart the book at Part 1.')">
+                                <button type="submit" class="btn btn-sm btn-outline-danger"
+                                    onclick="return confirm('Are you sure? This will restart the book at Part 1.')">
                                     Change & Restart
                                 </button>
                             </div>
                         </form>
                     </div>
                 </div>
-                
+
                 <!-- CARD 3: SETTINGS -->
                 <div class="card shadow-sm mb-5">
                     <div class="card-body">
                         <h5 class="card-title mb-4">Settings</h5>
-                        
+
                         <!-- NEW: DELIVERY PREFERENCES FORM -->
                         <form action="/update_preferences" method="post" class="mb-4 pb-3 border-bottom">
                             <input type="hidden" name="token" value="{{ token }}">
-                            
+
                             <div class="row g-3">
                                 <div class="col-md-6">
                                     <label class="form-label small fw-bold text-muted">Time Zone</label>
                                     <select name="timezone" class="form-select form-select-sm">
-                                        <option value="UTC" {% if user_tz == 'UTC' %}selected{% endif %}>UTC</option>
-                                        <option value="US/Eastern" {% if user_tz == 'US/Eastern' %}selected{% endif %}>US/Eastern</option>
-                                        <option value="US/Central" {% if user_tz == 'US/Central' %}selected{% endif %}>US/Central</option>
-                                        <option value="US/Mountain" {% if user_tz == 'US/Mountain' %}selected{% endif %}>US/Mountain</option>
-                                        <option value="US/Pacific" {% if user_tz == 'US/Pacific' %}selected{% endif %}>US/Pacific</option>
-                                        <option value="Europe/London" {% if user_tz == 'Europe/London' %}selected{% endif %}>Europe/London</option>
-                                        <option value="Europe/Paris" {% if user_tz == 'Europe/Paris' %}selected{% endif %}>Europe/Paris</option>
-                                        <option value="Asia/Tokyo" {% if user_tz == 'Asia/Tokyo' %}selected{% endif %}>Asia/Tokyo</option>
-                                        <option value="Australia/Sydney" {% if user_tz == 'Australia/Sydney' %}selected{% endif %}>Australia/Sydney</option>
+                                        <option value="UTC" {% if user_tz=='UTC' %}selected{% endif %}>UTC</option>
+                                        <option value="US/Eastern" {% if user_tz=='US/Eastern' %}selected{% endif %}>
+                                            US/Eastern</option>
+                                        <option value="US/Central" {% if user_tz=='US/Central' %}selected{% endif %}>
+                                            US/Central</option>
+                                        <option value="US/Mountain" {% if user_tz=='US/Mountain' %}selected{% endif %}>
+                                            US/Mountain</option>
+                                        <option value="US/Pacific" {% if user_tz=='US/Pacific' %}selected{% endif %}>
+                                            US/Pacific</option>
+                                        <option value="Europe/London" {% if user_tz=='Europe/London' %}selected{% endif
+                                            %}>Europe/London</option>
+                                        <option value="Europe/Paris" {% if user_tz=='Europe/Paris' %}selected{% endif
+                                            %}>Europe/Paris</option>
+                                        <option value="Asia/Tokyo" {% if user_tz=='Asia/Tokyo' %}selected{% endif %}>
+                                            Asia/Tokyo</option>
+                                        <option value="Australia/Sydney" {% if user_tz=='Australia/Sydney' %}selected{%
+                                            endif %}>Australia/Sydney</option>
                                     </select>
                                 </div>
-                                
+
                                 <div class="col-md-4">
                                     <label class="form-label small fw-bold text-muted">Delivery Hour</label>
                                     <select name="delivery_hour" class="form-select form-select-sm">
                                         {% for h in range(0, 24) %}
-                                        <option value="{{ h }}" {% if delivery_hour == h %}selected{% endif %}>
+                                        <option value="{{ h }}" {% if delivery_hour==h %}selected{% endif %}>
                                             {{ h }}:00
                                         </option>
                                         {% endfor %}
                                     </select>
                                 </div>
-                                
+
                                 <div class="col-md-2 d-flex align-items-end">
                                     <button type="submit" class="btn btn-sm btn-primary w-100">Save</button>
                                 </div>
                             </div>
                         </form>
-                        
+
                         <!-- VACATION MODE TOGGLE -->
                         <div class="d-flex justify-content-between align-items-center border-bottom pb-3 mb-3">
                             <div>
@@ -151,18 +172,18 @@
                             <form action="/toggle_pause" method="post">
                                 <input type="hidden" name="token" value="{{ token }}">
                                 {% if status == 'active' %}
-                                    <button type="submit" class="btn btn-outline-secondary btn-sm">Pause Emails</button>
+                                <button type="submit" class="btn btn-outline-secondary btn-sm">Pause Emails</button>
                                 {% else %}
-                                    <button type="submit" class="btn btn-success btn-sm">Resume Emails</button>
+                                <button type="submit" class="btn btn-success btn-sm">Resume Emails</button>
                                 {% endif %}
                             </form>
                         </div>
-                        
+
                         <!-- STATUS ALERT -->
                         <div class="alert {{ 'alert-success' if status == 'active' else 'alert-warning' }} mb-0">
                             Current Status: <strong>{{ status|capitalize }}</strong>
                         </div>
-                        
+
                     </div>
                 </div>
 
@@ -170,4 +191,5 @@
         </div>
     </div>
 </body>
+
 </html>

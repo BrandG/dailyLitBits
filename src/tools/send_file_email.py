@@ -5,7 +5,7 @@ import os
 # Add the 'src' directory to the Python path to allow importing 'dispatch'
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from dispatch import send_via_sendgrid
+from dispatch import send_via_brevo
 
 def send_file_by_email(file_path):
     """
@@ -20,7 +20,7 @@ def send_file_by_email(file_path):
         
         print(f"Sending content of '{file_path}' to {recipient_email}...")
         
-        success = send_via_sendgrid(recipient_email, subject, html_content)
+        success = send_via_brevo(recipient_email, subject, html_content)
         
         if success:
             print("Email sent successfully!")
