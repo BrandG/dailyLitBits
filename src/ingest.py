@@ -185,13 +185,30 @@ def split_long_paragraph(paragraph, target_words):
     count = 0
 
     for sentence in sentences:
-        words = len(sentence.split())
-        if current and count + words > target_words:
+        words = sentence.split()
+
+        # A single "sentence" can still dwarf a chunk. Ulysses' last episode
+        # has no sentence-ending punctuation at all, which produced 4,400-word
+        # deliveries in a 325-word scheme. When there is no sentence boundary
+        # to use, split on word count: a mid-sentence break reads poorly, but
+        # it is the only break available and it beats sending eight chunks as
+        # one. The 2x threshold leaves genuinely long sentences intact.
+        if len(words) > target_words * 2:
+            if current:
+                pieces.append(" ".join(current))
+                current = []
+                count = 0
+            for start in range(0, len(words), target_words):
+                pieces.append(" ".join(words[start:start + target_words]))
+            continue
+
+        if current and count + len(words) > target_words:
             pieces.append(" ".join(current))
             current = []
             count = 0
+
         current.append(sentence)
-        count += words
+        count += len(words)
 
     if current:
         pieces.append(" ".join(current))
@@ -260,8 +277,16 @@ def generate_recaps_for_book(conn, book_id, limit=None):
     calls cannot be parallelised within a book, and every chunk needs one.
     That is why this never runs as part of a plain ingest.
 
-    Resumable: picks up after the last chunk that already has a recap, and
-    stops at the first failure rather than leaving a hole in the chain.
+    Chunks that already have a recap are skipped without an API call, so
+    re-running is cheap and this doubles as the resume path.
+
+    A chunk the model will not summarise is left NULL and the previous
+    context carries forward. Gemini's PROHIBITED_CONTENT filter rejects some
+    passages of classic literature outright, and it is not configurable - so
+    stopping the book at the first refusal (which this used to do) left 1,256
+    chunks of War and Peace unprocessed behind one blocked passage. A missing
+    recap costs the reader the "Previously:" block on one delivery; a stopped
+    chain costs them the rest of the book.
     """
     rows = conn.execute(
         "SELECT sequence, content, recap FROM chunks WHERE book_id = ? ORDER BY sequence",
@@ -272,35 +297,35 @@ def generate_recaps_for_book(conn, book_id, limit=None):
         print(f"   [Recaps] No chunks stored for '{book_id}' - ingest it first.")
         return 0, 0.0
 
-    previous_recap = None
-    start_at = 0
-    for i, row in enumerate(rows):
-        if row["recap"]:
-            previous_recap = row["recap"]
-            start_at = i + 1
-        else:
-            break
-
-    todo = rows[start_at:]
-    if limit:
-        todo = todo[:limit]
-
-    if not todo:
+    missing = sum(1 for row in rows if row["recap"] is None)
+    if not missing:
         print(f"   [Recaps] '{book_id}' already complete ({len(rows)} chunks).")
         return 0, 0.0
 
-    print(f"   [Recaps] {len(todo)} of {len(rows)} chunks need a recap for '{book_id}'...")
+    print(f"   [Recaps] {missing} of {len(rows)} chunks need a recap for '{book_id}'...")
+    previous_recap = None
     calls = 0
+    blocked = 0
     started = time.time()
 
-    for row in todo:
+    for row in rows:
+        # Already done: carry its context forward, spend nothing.
+        if row["recap"]:
+            previous_recap = row["recap"]
+            continue
+
+        if limit is not None and calls >= limit:
+            print(f"   [Recaps] Reached the --limit of {limit} calls.")
+            break
+
         summary = ai.generate_recap(row["content"], previous_recap=previous_recap)
         calls += 1
 
         if not summary:
-            print(f"   [Recaps] Nothing returned for chunk {row['sequence']}; stopping "
-                  f"here so the chain stays intact. Re-run to resume.")
-            break
+            blocked += 1
+            print(f"   [Recaps] Chunk {row['sequence']} left without a recap; "
+                  f"carrying the previous context forward.")
+            continue
 
         conn.execute(
             "UPDATE chunks SET recap = ? WHERE book_id = ? AND sequence = ?",
@@ -309,11 +334,12 @@ def generate_recaps_for_book(conn, book_id, limit=None):
         previous_recap = summary
 
         if calls % 25 == 0:
-            print(f"   [Recaps] {calls} done, {time.time() - started:.0f}s elapsed...")
+            print(f"   [Recaps] {calls} calls, {time.time() - started:.0f}s elapsed...")
 
     elapsed = time.time() - started
     per_call = elapsed / calls if calls else 0
-    print(f"   [Recaps] {calls} Gemini calls in {elapsed:.1f}s ({per_call:.2f}s per call).")
+    print(f"   [Recaps] {calls} Gemini calls in {elapsed:.1f}s ({per_call:.2f}s per call)"
+          + (f", {blocked} chunk(s) refused by the content filter." if blocked else "."))
     return calls, elapsed
 
 
@@ -407,6 +433,9 @@ if __name__ == "__main__":
                         help="Also generate chained recaps: one Gemini call per "
                              "chunk, sequential. Off by default because a whole "
                              "library is tens of thousands of calls.")
+    parser.add_argument("--blurb-only", action="store_true",
+                        help="Regenerate just the library blurb for a book already "
+                             "stored. No download, no re-chunking, keeps recaps.")
     parser.add_argument("--recaps-only", action="store_true",
                         help="Backfill recaps for a book already in the database. "
                              "No download, no re-chunking.")
@@ -414,6 +443,25 @@ if __name__ == "__main__":
                         help="With --recaps/--recaps-only, stop after N chunks. "
                              "Useful for measuring what a full run would cost.")
     args = parser.parse_args()
+
+    if args.blurb_only:
+        book_id = args.id if args.id else derive_metadata(args.source)[1]
+        conn = db.get_db()
+        try:
+            row = conn.execute(
+                "SELECT id, title, author FROM books WHERE id = ?", (book_id,)).fetchone()
+            if not row:
+                print(f"'{book_id}' is not in the database - ingest it first.")
+                sys.exit(1)
+            blurb = generate_blurb(row["title"], row["author"])
+            if not blurb:
+                print("No blurb returned.")
+                sys.exit(1)
+            conn.execute("UPDATE books SET blurb = ? WHERE id = ?", (blurb, book_id))
+            print(f"Updated the blurb for {book_id}.")
+        finally:
+            conn.close()
+        sys.exit(0)
 
     if args.recaps_only:
         book_id = args.id if args.id else derive_metadata(args.source)[1]

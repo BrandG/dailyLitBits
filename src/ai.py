@@ -73,6 +73,19 @@ def generate_recap(current_text_chunk, previous_recap=None):
                 )
             )
             
+            # A prompt-level block is deterministic, so retrying the same
+            # prompt only burns the backoff. PROHIBITED_CONTENT is one of
+            # Gemini's non-configurable filters: the BLOCK_NONE settings above
+            # do not affect it, and neither does sending no safety settings.
+            # Classic literature trips it - Dostoevsky, Joyce and Tolstoy all
+            # did during the 2026-10-26 recap run. Report and give up on this
+            # one chunk rather than the whole book.
+            feedback = getattr(response, "prompt_feedback", None)
+            blocked = getattr(feedback, "block_reason", None) if feedback else None
+            if blocked:
+                print(f"   [AI Blocked] {blocked}: skipping this chunk, not retrying.")
+                return None
+
             if not response.text:
                 raise ValueError("Model returned empty response")
 
