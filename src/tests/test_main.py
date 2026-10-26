@@ -1,228 +1,269 @@
-import pytest
-from fastapi.testclient import TestClient
-from pymongo import MongoClient
-from main import app, get_db, cipher
-import config
-import os
-import time
-from datetime import datetime
+"""The HTTP surface: signing up, the dashboard, the email links, admin."""
+import re
+
 import security
-from bson import ObjectId
+from user_manager import UserManager
 
 
-# --- FIXTURES ---
+def dashboard_token_from(email_body):
+    match = re.search(r"/profile\?token=([^\"]+)", email_body)
+    assert match, "no dashboard link in the email"
+    return match.group(1)
 
 
-# Use a unique database name for each test run to ensure isolation
-@pytest.fixture(scope="module")
-def test_db_client():
-    # Ensure we use a unique test database name
-    TEST_DB_NAME = f"test_dailylitbits_{int(time.time())}"
-    
-    # Connect to a MongoDB instance (assuming it's running locally or accessible)
-    client = MongoClient(config.MONGO_URI)
-    test_db = client[TEST_DB_NAME]
+# --- public pages ---
 
-    # Yield the test database client
-    yield test_db
-
-    # Ensure unique index on email_enc for users collection
-    test_db.users.create_index("email_enc", unique=True)
-
-    # Cleanup: Drop the test database after all tests in the module are done
-    client.drop_database(TEST_DB_NAME)
-    client.close()
-
-
-@pytest.fixture(scope="module")
-def test_app_client(test_db_client):
-    # Override the get_db dependency to use our test database
-    app.dependency_overrides[get_db] = lambda: test_db_client
-
-    # Yield the TestClient instance
-    with TestClient(app) as client:
-        yield client
-
-    # Clean up the dependency override
-    app.dependency_overrides.clear()
-
-# --- TESTS ---
-
-def test_read_main(test_app_client):
-    response = test_app_client.get("/")
+def test_homepage_lists_the_library(client, book):
+    response = client.get("/")
     assert response.status_code == 200
-    assert "DailyLitBits" in response.text
+    assert "Test Book" in response.text
 
-def test_signup_success(test_app_client, test_db_client):
-    test_email = "test@example.com"
-    test_book_id = "pg11"
 
-    # Ensure the book exists in the test database for the signup to be valid
-    # This is a minimal book entry, just enough to pass the check in handle_signup
-    test_db_client.books.insert_one({
-        "book_id": test_book_id,
-        "title": "Test Book",
-        "author": "Test Author",
-        "chunk_size": 750 # Match filtering on main page
-    })
-
-    response = test_app_client.post(
-        "/signup", 
-        data={
-            "email": test_email,
-            "book_id": test_book_id,
-            "timezone": "America/New_York"
-        }
-    )
-    
+def test_library_page_renders(client, book):
+    response = client.get("/library")
     assert response.status_code == 200
-    assert f"Success! You will start receiving &#39;Test Book&#39; tomorrow at 6:00 AM (America/New_York)." in response.text
+    assert "Test Book" in response.text
 
-    # Verify user and subscription were created in the test database
-    # Due to Fernet's non-deterministic encryption, we cannot reliably search by re-encrypting the email.
-    # Instead, we'll find the user by their timezone and assume it's the one just created.
-    user = test_db_client.users.find_one({"timezone": "America/New_York"})
+
+# --- signing up ---
+
+def test_signup_creates_a_reader_and_mails_a_link(client, conn, book, sent):
+    response = client.post("/signup", data={
+        "email": "new@example.com", "book_id": book, "timezone": "US/Eastern"})
+
+    assert response.status_code == 200
+    assert "starts tomorrow" in response.text
+
+    manager = UserManager(conn)
+    user = manager.get_user_by_email("new@example.com")
     assert user is not None
+    assert user["timezone"] == "US/Eastern"
+    assert user["role"] == "reader"
 
-    subscription = test_db_client.subscriptions.find_one({"user_id": user['_id'], "book_id": test_book_id})
-    assert subscription is not None
-    assert subscription['status'] == "active"
-    assert subscription['current_sequence'] == 1
+    sub = conn.execute("SELECT * FROM subscriptions WHERE user_id = ?", (user["id"],)).fetchone()
+    assert sub["status"] == "active"
+    assert sub["current_sequence"] == 1
 
-def test_signup_duplicate_email(test_app_client, test_db_client):
-    test_email = "duplicate@example.com"
-    test_book_id = "pg12"
+    assert len(sent) == 1
+    assert security.verify_dashboard_token(dashboard_token_from(sent[0]["body"])) == str(user["id"])
 
-    # Pre-create a user and subscription to simulate a duplicate
-    # This requires directly inserting into the test database
-    existing_user_id = test_db_client.users.insert_one({
-        "email_enc": cipher.encrypt(test_email.encode()),
-        "timezone": "UTC"
-    }).inserted_id
-    test_db_client.subscriptions.insert_one({
-        "user_id": existing_user_id,
-        "book_id": "pg12",
-        "current_sequence": 1,
-        "status": "active",
-        "created_at": datetime.now(),
-        "last_sent": None
-    })
-    test_db_client.books.insert_one({
-        "book_id": test_book_id,
-        "title": "Another Test Book",
-        "author": "Test Author",
-        "chunk_size": 750
-    })
 
-    response = test_app_client.post(
-        "/signup", 
-        data={
-            "email": test_email,
-            "book_id": test_book_id,
-            "timezone": "Europe/London"
-        }
-    )
-    
+def test_a_second_book_is_queued_not_started(client, conn, book, sent):
+    conn.execute(
+        """INSERT INTO books (id, title, author, total_chunks, total_words, created_at)
+           VALUES ('pgtwo', 'Second Book', 'Author', 4, 1200, '2026-01-01T00:00:00+00:00')""")
+
+    client.post("/signup", data={"email": "new@example.com", "book_id": book})
+    response = client.post("/signup", data={"email": "new@example.com", "book_id": "pgtwo"})
+
+    assert "queue" in response.text.lower()
+    statuses = dict(conn.execute(
+        """SELECT book_id, status FROM subscriptions s
+           JOIN users u ON u.id = s.user_id WHERE u.email_lookup = ?""",
+        (UserManager(conn).email_lookup("new@example.com"),)).fetchall())
+    assert statuses[book] == "active"
+    assert statuses["pgtwo"] == "queued"
+
+
+def test_signing_up_for_the_same_book_twice_is_refused_politely(client, conn, book, sent):
+    client.post("/signup", data={"email": "new@example.com", "book_id": book})
+    response = client.post("/signup", data={"email": "new@example.com", "book_id": book})
+
+    assert response.status_code == 200
+    assert "already reading" in response.text.lower()
+    assert conn.execute("SELECT COUNT(*) FROM subscriptions").fetchone()[0] == 1
+
+
+def test_signup_for_an_unknown_book_is_refused(client, conn, book):
+    response = client.post("/signup", data={"email": "new@example.com", "book_id": "nope"})
+    assert "not in the library" in response.text
+    assert conn.execute("SELECT COUNT(*) FROM subscriptions").fetchone()[0] == 0
+
+
+# --- getting back in ---
+
+def test_login_mails_the_link_for_a_known_address(client, conn, book, sent):
+    user_id, _ = UserManager(conn).get_or_create_user("reader@example.com")
+    response = client.post("/login", data={"email": "reader@example.com"})
+
+    assert response.status_code == 200
+    assert len(sent) == 1
+    assert security.verify_dashboard_token(dashboard_token_from(sent[0]["body"])) == str(user_id)
+
+
+def test_login_does_not_reveal_whether_an_address_is_known(client, conn, book, sent):
+    known_user, _ = UserManager(conn).get_or_create_user("reader@example.com")
+    known = client.post("/login", data={"email": "reader@example.com"})
+    unknown = client.post("/login", data={"email": "stranger@example.com"})
+
+    assert known.status_code == unknown.status_code == 200
+    # Same words either way; only the mailing differs.
+    assert "on its way" in known.text and "on its way" in unknown.text
+    assert len(sent) == 1
+
+
+# --- dashboard ---
+
+def test_dashboard_shows_progress(client, conn, reader):
+    user_id, _ = reader
+    response = client.get(f"/profile?token={security.generate_dashboard_token(user_id)}")
+
+    assert response.status_code == 200
+    assert "Test Book" in response.text
+    assert "Part 1 of 10" in response.text
+
+
+def test_dashboard_rejects_a_bad_or_wrong_purpose_token(client, conn, reader):
+    user_id, sub_id = reader
+    assert client.get("/profile?token=rubbish").status_code == 400
+    # An unsubscribe link must not open someone's dashboard.
+    assert client.get(
+        f"/profile?token={security.generate_unsub_token(sub_id)}").status_code == 400
+
+
+def test_changing_delivery_size_keeps_the_readers_place(client, conn, reader):
+    user_id, sub_id = reader
+    conn.execute("UPDATE subscriptions SET current_sequence = 6 WHERE id = ?", (sub_id,))
+
+    response = client.post("/update_preferences", data={
+        "token": security.generate_dashboard_token(user_id),
+        "sub_id": sub_id, "timezone": "US/Pacific",
+        "delivery_hour": 7, "chunks_per_day": 4,
+    }, follow_redirects=False)
+
+    assert response.status_code == 303
+    row = conn.execute(
+        "SELECT current_sequence, chunks_per_day, delivery_hour FROM subscriptions WHERE id = ?",
+        (sub_id,)).fetchone()
+    assert row["chunks_per_day"] == 4
+    assert row["delivery_hour"] == 7
+    assert row["current_sequence"] == 6
+
+
+def test_you_cannot_change_someone_elses_subscription(client, conn, reader):
+    """The token says who you are; the subscription has to belong to you."""
+    _, victim_sub = reader
+    attacker_id, _ = UserManager(conn).get_or_create_user("attacker@example.com")
+
+    response = client.post("/update_preferences", data={
+        "token": security.generate_dashboard_token(attacker_id),
+        "sub_id": victim_sub, "timezone": "UTC",
+        "delivery_hour": 23, "chunks_per_day": 12,
+    }, follow_redirects=False)
+
     assert response.status_code == 400
-    assert "This email address is already registered. Please try a different one." in response.text
+    row = conn.execute("SELECT delivery_hour, chunks_per_day FROM subscriptions WHERE id = ?",
+                       (victim_sub,)).fetchone()
+    assert row["delivery_hour"] == 6
+    assert row["chunks_per_day"] == 2
 
-def test_signup_missing_fields(test_app_client):
-    response = test_app_client.post(
-        "/signup", 
-        data={
-            "email": "incomplete@example.com" # Missing book_id
-        }
-    )
-    # FastAPI returns 422 for validation errors (missing required form fields)
-    assert response.status_code == 422
-    # You might check for specific error detail in JSON response if needed
 
-def test_intro_page(test_app_client):
-    response = test_app_client.get("/intro")
+def test_pause_and_resume(client, conn, reader):
+    user_id, sub_id = reader
+    token = security.generate_dashboard_token(user_id)
+
+    client.post("/toggle_pause", data={"token": token, "sub_id": sub_id}, follow_redirects=False)
+    assert conn.execute("SELECT status FROM subscriptions WHERE id = ?",
+                        (sub_id,)).fetchone()["status"] == "paused"
+
+    client.post("/toggle_pause", data={"token": token, "sub_id": sub_id}, follow_redirects=False)
+    assert conn.execute("SELECT status FROM subscriptions WHERE id = ?",
+                        (sub_id,)).fetchone()["status"] == "active"
+
+
+def test_switch_book_sets_the_new_book_reading_and_queues_the_old(client, conn, reader):
+    user_id, old_sub = reader
+    conn.execute(
+        """INSERT INTO books (id, title, author, total_chunks, total_words, created_at)
+           VALUES ('pgtwo', 'Second Book', 'Author', 4, 1200, '2026-01-01T00:00:00+00:00')""")
+
+    response = client.get(
+        f"/switch_book?token={security.generate_dashboard_token(user_id)}&new_book_id=pgtwo")
+
     assert response.status_code == 200
-    assert "Welcome to DailyLitBits" in response.text
+    assert "Second Book" in response.text
+    assert conn.execute("SELECT status FROM subscriptions WHERE id = ?",
+                        (old_sub,)).fetchone()["status"] == "queued"
+    assert conn.execute("SELECT status FROM subscriptions WHERE book_id = 'pgtwo'"
+                        ).fetchone()["status"] == "active"
 
-def test_library_page(test_app_client):
-    response = test_app_client.get("/library")
+
+# --- email links ---
+
+def test_next_link_sends_the_next_part(client, conn, reader, sent):
+    _, sub_id = reader
+    response = client.get(f"/next?token={security.generate_next_token(sub_id)}")
+
     assert response.status_code == 200
-    assert "The Library" in response.text
-    # Add a minimal book to the test_db to ensure the library page has content to render
-    # and doesn't crash if the book list is empty
-    # This assumes test_db_client is available in this scope, which it is for fixtures
-    # However, test_db_client is a module-scoped fixture, so it's not directly accessible
-    # in an app-scoped test. We might need to adjust fixture scope or inject db for this.
-    # For now, let's just check for general page elements.
+    assert "On its way" in response.text
+    assert len(sent) == 1
 
-def test_privacy_page(test_app_client):
-    response = test_app_client.get("/privacy")
-    assert response.status_code == 200
-    assert "Privacy Policy" in response.text
 
-def test_unsubscribe_flow(test_app_client, test_db_client):
-    # 1. Setup: Create a user and an active subscription
-    user_id = test_db_client.users.insert_one({
-        "email_enc": cipher.encrypt(b"unsub@example.com"),
-        "timezone": "UTC"
-    }).inserted_id
-
-    sub_id = test_db_client.subscriptions.insert_one({
-        "user_id": user_id,
-        "book_id": "pg13",
-        "current_sequence": 5,
-        "status": "active"
-    }).inserted_id
-
-    # 2. Generate a valid token for this subscription
+def test_unsubscribe_confirms_then_unsubscribes(client, conn, reader):
+    """This POST used to 500: the token carried an email, the handler wanted an id."""
+    _, sub_id = reader
     token = security.generate_unsub_token(sub_id)
 
-    # 3. Test GET request to the confirmation page
-    get_response = test_app_client.get(f"/unsubscribe?token={token}")
-    assert get_response.status_code == 200
-    assert "Are you sure you want to stop receiving this book?" in get_response.text
+    confirm = client.get(f"/unsubscribe?token={token}")
+    assert confirm.status_code == 200
+    assert "Are you sure" in confirm.text
 
-    # 4. Test POST request to process the unsubscription
-    post_response = test_app_client.post(
-        "/unsubscribe",
-        data={"token": token}
-    )
-    assert post_response.status_code == 200
-    assert "You have been successfully unsubscribed." in post_response.text
+    done = client.post("/unsubscribe", data={"token": token})
+    assert done.status_code == 200
+    assert "have been unsubscribed" in done.text
+    assert conn.execute("SELECT status FROM subscriptions WHERE id = ?",
+                        (sub_id,)).fetchone()["status"] == "unsubscribed"
 
-    # 5. Verify the subscription status in the database
-    updated_sub = test_db_client.subscriptions.find_one({"_id": sub_id})
-    assert updated_sub['status'] == "unsubscribed"
 
-def test_admin_page_unauthorized(test_app_client):
-    response = test_app_client.get("/admin")
-    assert response.status_code == 401
+def test_unsubscribe_rejects_a_bad_token(client, conn, reader):
+    assert client.post("/unsubscribe", data={"token": "rubbish"}).status_code == 400
 
-def test_admin_page_authorized(test_app_client, test_db_client):
-    # 1. Setup: Create a user and subscription to ensure the page has data
-    user_email = "admin_test@example.com"
-    user_id = test_db_client.users.insert_one({
-        "email_enc": cipher.encrypt(user_email.encode()),
-        "timezone": "UTC"
-    }).inserted_id
-    test_db_client.subscriptions.insert_one({
-        "user_id": user_id,
-        "book_id": "pg14",
-        "status": "active"
-    })
-    test_db_client.books.insert_one({
-        "book_id": "pg14",
-        "title": "Admin Test Book",
-        "author": "Admin Author",
-        "total_chunks": 100
-    })
 
-    # 2. Access the admin page with correct credentials
-    response = test_app_client.get(
-        "/admin",
-        auth=("admin", "change_this_password")
-    )
+# --- admin ---
 
-    # 3. Assert success and that our test user's data is present
+def test_admin_needs_a_token(client, conn, reader):
+    assert client.get("/admin").status_code == 400
+
+
+def test_admin_rejects_a_dashboard_token(client, conn, reader):
+    user_id, _ = reader
+    UserManager(conn).set_role(user_id, "admin")
+    response = client.get(f"/admin?token={security.generate_dashboard_token(user_id)}")
+    assert response.status_code == 400
+
+
+def test_admin_rejects_a_reader_holding_a_valid_admin_token(client, conn, reader):
+    user_id, _ = reader
+    response = client.get(f"/admin?token={security.generate_admin_token(user_id)}")
+    assert response.status_code == 403
+
+
+def test_admin_shows_subscribers_to_an_admin(client, conn, reader):
+    user_id, _ = reader
+    UserManager(conn).set_role(user_id, "admin")
+
+    response = client.get(f"/admin?token={security.generate_admin_token(user_id)}")
     assert response.status_code == 200
-    assert "Admin Dashboard" in response.text
-    assert user_email in response.text
-    assert "Admin Test Book" in response.text
+    assert "reader@example.com" in response.text
+    assert "Test Book" in response.text
+
+
+def test_expired_admin_token_is_refused(client, conn, reader, monkeypatch):
+    user_id, _ = reader
+    UserManager(conn).set_role(user_id, "admin")
+    monkeypatch.setattr(security, "ADMIN_TOKEN_MAX_AGE", -1)
+
+    response = client.get(f"/admin?token={security.generate_admin_token(user_id)}")
+    assert response.status_code == 400
+
+
+# --- suggestions ---
+
+def test_suggestion_is_stored(client, conn):
+    response = client.post("/suggest", data={
+        "title": "Moby Dick", "author": "Melville", "link": "", "comments": "please"})
+
+    assert response.status_code == 200
+    row = conn.execute("SELECT * FROM suggestions").fetchone()
+    assert row["title"] == "Moby Dick"
+    assert row["status"] == "pending"

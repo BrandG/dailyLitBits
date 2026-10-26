@@ -7,7 +7,7 @@ import json
 import re
 
 # Use the recommended model name for the new SDK
-GENAI_MODEL_NAME = 'gemini-2.0-flash' 
+GENAI_MODEL_NAME = config.GEMINI_MODEL
 
 # Initialize client if API key is present
 client = None

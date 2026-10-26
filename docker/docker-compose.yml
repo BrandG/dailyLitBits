@@ -10,6 +10,9 @@ services:
     volumes:
       # Map the local src folder to /app inside container for live updates
       - ../src:/app
+      # SQLite database file, so it survives container recreation and can be
+      # backed up from the host. config.DB_PATH resolves to /data/app.db here.
+      - ../data:/data
     env_file:
       - ../.env
     # Connect to the private BlueHorseshoe network

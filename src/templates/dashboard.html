@@ -29,6 +29,7 @@
             <div class="col-md-8">
 
                 <!-- CARD 1: CURRENTLY READING -->
+                {% if book_title %}
                 <div class="card shadow-sm mb-4">
                     <div class="card-header">
                         <h5 class="mb-0">Currently Reading</h5>
@@ -49,6 +50,15 @@
                         </div>
                     </div>
                 </div>
+                {% else %}
+                <div class="card shadow-sm mb-4">
+                    <div class="card-body text-center py-4">
+                        <h5 class="mb-2">Nothing arriving right now</h5>
+                        <p class="text-muted mb-3">Pick something from the library and it starts tomorrow.</p>
+                        <a href="/library" class="btn btn-success btn-sm px-4">Browse the library</a>
+                    </div>
+                </div>
+                {% endif %}
 
                 <!-- CARD 1.5: UP NEXT QUEUE -->
                 {% if queued_books and queued_books|length > 0 %}
@@ -78,52 +88,23 @@
                 </div>
                 {% endif %}
 
-                <!-- CARD 2: READING SPEED -->
-                <div class="card shadow-sm mb-4">
-                    <div class="card-body">
-                        <h5 class="card-title mb-3">Reading Speed</h5>
-
-                        <p class="small text-muted">
-                            Current Edition: <strong>{{ edition_label }}</strong><br>
-                            <span class="text-danger">Warning: Changing speeds will reset your progress to Part
-                                1.</span>
-                        </p>
-
-                        <form action="/change_edition" method="post" class="row g-2 align-items-center">
-                            <input type="hidden" name="token" value="{{ token }}">
-
-                            <div class="col-auto">
-                                <select name="target_edition" class="form-select form-select-sm">
-                                    <option value="short" {% if current_edition=='short' %}selected{% endif %}>Short
-                                        (~325 words)</option>
-                                    <option value="standard" {% if current_edition=='standard' %}selected{% endif %}>
-                                        Standard (~750 words)</option>
-                                    <option value="long" {% if current_edition=='long' %}selected{% endif %}>Long (~1500
-                                        words)</option>
-                                </select>
-                            </div>
-
-                            <div class="col-auto">
-                                <button type="submit" class="btn btn-sm btn-outline-danger"
-                                    onclick="return confirm('Are you sure? This will restart the book at Part 1.')">
-                                    Change & Restart
-                                </button>
-                            </div>
-                        </form>
-                    </div>
-                </div>
-
                 <!-- CARD 3: SETTINGS -->
+                {% if sub_id %}
                 <div class="card shadow-sm mb-5">
                     <div class="card-body">
                         <h5 class="card-title mb-4">Settings</h5>
+                        <p class="text-muted small mb-4">
+                            Changing how much arrives each day keeps your place &mdash; it only
+                            changes how many parts the next email carries.
+                        </p>
 
                         <!-- NEW: DELIVERY PREFERENCES FORM -->
                         <form action="/update_preferences" method="post" class="mb-4 pb-3 border-bottom">
                             <input type="hidden" name="token" value="{{ token }}">
+                            <input type="hidden" name="sub_id" value="{{ sub_id }}">
 
                             <div class="row g-3">
-                                <div class="col-md-6">
+                                <div class="col-md-4">
                                     <label class="form-label small fw-bold text-muted">Time Zone</label>
                                     <select name="timezone" class="form-select form-select-sm">
                                         <option value="UTC" {% if user_tz=='UTC' %}selected{% endif %}>UTC</option>
@@ -146,12 +127,23 @@
                                     </select>
                                 </div>
 
-                                <div class="col-md-4">
+                                <div class="col-md-3">
                                     <label class="form-label small fw-bold text-muted">Delivery Hour</label>
                                     <select name="delivery_hour" class="form-select form-select-sm">
                                         {% for h in range(0, 24) %}
                                         <option value="{{ h }}" {% if delivery_hour==h %}selected{% endif %}>
                                             {{ h }}:00
+                                        </option>
+                                        {% endfor %}
+                                    </select>
+                                </div>
+
+                                <div class="col-md-3">
+                                    <label class="form-label small fw-bold text-muted">Each Day</label>
+                                    <select name="chunks_per_day" class="form-select form-select-sm">
+                                        {% for n in [1, 2, 3, 4, 6] %}
+                                        <option value="{{ n }}" {% if chunks_per_day==n %}selected{% endif %}>
+                                            {{ n }} part{{ '' if n == 1 else 's' }} (~{{ n * 325 }} words)
                                         </option>
                                         {% endfor %}
                                     </select>
@@ -171,6 +163,7 @@
                             </div>
                             <form action="/toggle_pause" method="post">
                                 <input type="hidden" name="token" value="{{ token }}">
+                                <input type="hidden" name="sub_id" value="{{ sub_id }}">
                                 {% if status == 'active' %}
                                 <button type="submit" class="btn btn-outline-secondary btn-sm">Pause Emails</button>
                                 {% else %}
@@ -186,6 +179,7 @@
 
                     </div>
                 </div>
+                {% endif %}
 
             </div>
         </div>

@@ -3,13 +3,13 @@
             <a class="navbar-brand fw-bold text-success fs-3" href="/">DailyLitBits</a>
 
             <div class="ms-auto">
-                {% if username %}
-                <span class="text-muted me-3">Welcome, {{ username }}</span>
-                {% endif %}
                 <a href="/intro" class="btn btn-link text-secondary text-decoration-none me-2">How it Works</a>
                 <a href="/library" class="btn btn-link text-success text-decoration-none me-2"
                     style="font-weight: 500;">Browse Library</a>
-                <a href="/login" class="btn btn-outline-success btn-sm px-4">Log In</a>
+                {# On the dashboard we already have a token, so don't offer a way in. #}
+                {% if not token %}
+                <a href="/login" class="btn btn-outline-success btn-sm px-4">My Dashboard</a>
+                {% endif %}
             </div>
         </div>
     </nav>

@@ -1,39 +1,90 @@
-import pytest
+"""Test fixtures.
+
+Each test module gets its own SQLite file in a temp directory, so tests no
+longer need a live database they have permission to create. DB_PATH is set
+before the app modules are imported, because config reads it at import time.
+
+Nothing here sends email: send_via_brevo is replaced with a recorder, and the
+tests assert against what would have been sent.
+"""
 import os
 import sys
-import importlib
-from cryptography.fernet import Fernet
+import tempfile
 
-# Ensure src is on the path for imports
-sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+import pytest
 
-# Import modules that use config.ENCRYPTION_KEY
-import config
-import security
-import main
-import user_manager
+sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
-@pytest.fixture(scope="module", autouse=True)
-def setup_test_environment():
-    original_key = config.ENCRYPTION_KEY
+os.environ["DB_PATH"] = os.path.join(tempfile.mkdtemp(prefix="dlb-test-"), "test.db")
 
-    # Generate a valid Fernet key for testing
-    test_key = Fernet.generate_key().decode()
-    config.ENCRYPTION_KEY = test_key
+import db  # noqa: E402
+import dispatch  # noqa: E402
+import main  # noqa: E402
+import security  # noqa: E402
+from user_manager import UserManager  # noqa: E402
 
-    # Force reload modules to pick up the new config.ENCRYPTION_KEY
-    importlib.reload(config)
-    importlib.reload(security)
-    importlib.reload(user_manager)
-    importlib.reload(main)
+BOOK_ID = "pgtest"
+CHUNK_COUNT = 10
+WORDS_PER_CHUNK = 320
 
-    yield
 
-    # Restore original configuration after tests
-    config.ENCRYPTION_KEY = original_key
-    
-    importlib.reload(config)
-    importlib.reload(security)
-    importlib.reload(user_manager)
-    importlib.reload(main)
+@pytest.fixture
+def conn():
+    """A clean database for every test."""
+    connection = db.get_db()
+    for table in ("chunks", "subscriptions", "books", "users", "suggestions"):
+        connection.execute(f"DELETE FROM {table}")
+    yield connection
+    connection.close()
 
+
+@pytest.fixture
+def book(conn):
+    """One book, ten chunks, recaps on all but the last."""
+    conn.execute(
+        """INSERT INTO books (id, title, author, blurb, total_chunks, total_words, created_at)
+           VALUES (?, 'Test Book', 'A Test Author', 'A blurb.', ?, ?, '2026-01-01T00:00:00+00:00')""",
+        (BOOK_ID, CHUNK_COUNT, CHUNK_COUNT * WORDS_PER_CHUNK),
+    )
+    conn.executemany(
+        "INSERT INTO chunks (book_id, sequence, content, word_count, recap) VALUES (?, ?, ?, ?, ?)",
+        [
+            (BOOK_ID, n, f"This is the text of part {n}. " * 20, WORDS_PER_CHUNK,
+             f"Recap through part {n}." if n < CHUNK_COUNT else None)
+            for n in range(1, CHUNK_COUNT + 1)
+        ],
+    )
+    return BOOK_ID
+
+
+@pytest.fixture
+def sent(monkeypatch):
+    """Captures outgoing email instead of sending it."""
+    outbox = []
+
+    def fake_send(to_email, subject, html_body):
+        outbox.append({"to": to_email, "subject": subject, "body": html_body})
+        return True
+
+    monkeypatch.setattr(dispatch, "send_via_brevo", fake_send)
+    return outbox
+
+
+@pytest.fixture
+def client():
+    from fastapi.testclient import TestClient
+    return TestClient(main.app)
+
+
+@pytest.fixture
+def reader(conn, book):
+    """A subscriber part-way through the book. Returns (user_id, sub_id)."""
+    user_id, _ = UserManager(conn).get_or_create_user("reader@example.com")
+    cur = conn.execute(
+        """INSERT INTO subscriptions
+               (user_id, book_id, status, current_sequence, chunks_per_day,
+                delivery_hour, last_sent, created_at)
+           VALUES (?, ?, 'active', 1, 2, 6, NULL, '2026-01-01T00:00:00+00:00')""",
+        (user_id, book),
+    )
+    return user_id, cur.lastrowid

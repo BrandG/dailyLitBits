@@ -24,12 +24,11 @@ typing-inspection==0.4.2
 typing_extensions==4.15.0
 urllib3==2.5.0
 uvicorn==0.38.0
-Werkzeug==3.1.4
 itsdangerous
 google-genai
 pytz
-passlib
-argon2-cffi
 beautifulsoup4
 pytest
 httpx
+# pymongo is only still here for the two unported scripts in src/tools/.
+# Nothing the website or cron runs touches MongoDB any more.

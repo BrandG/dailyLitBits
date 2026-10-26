@@ -5,17 +5,15 @@ import sys
 import os
 import shutil
 from google import genai
-from pymongo import MongoClient
+from datetime import datetime, timezone
 import config
 import time
-
-# --- SETUP ---
-client_db = MongoClient(config.MONGO_URI)
-db = client_db[config.DB_NAME]
+import ai
+import db
 
 # --- AI & PATH CONFIGURATION ---
 COVER_DIR = "static/covers"
-GENAI_MODEL_NAME = 'gemini-2.0-flash' 
+GENAI_MODEL_NAME = config.GEMINI_MODEL
 
 ai_client = None
 if config.GEMINI_API_KEY:
@@ -23,11 +21,14 @@ if config.GEMINI_API_KEY:
 
 
 # --- CONFIGURATION ---
-EDITION_CONFIG = {
-    "std":   {"suffix": "",       "words": 750},  # Standard (No suffix)
-    "short": {"suffix": "_short", "words": 325},  # Short
-    "long":  {"suffix": "_long",  "words": 1500}  # Long
-}
+# Every book is chunked once, at this size. Readers choose how many chunks
+# arrive per day (subscriptions.chunks_per_day), so this is the smallest
+# unit of delivery rather than one of three stored editions.
+CHUNK_TARGET_WORDS = 325
+
+
+def utc_now():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 def get_gutenberg_text(url):
     try:
@@ -169,108 +170,207 @@ def generate_blurb(title, author):
 
 
 # --- CORE CHUNKING LOGIC ---
-def create_edition_chunks(paragraphs, unique_book_id, edition_name, target_words):
-    memory_chunks = []
+def split_long_paragraph(paragraph, target_words):
+    """Splits a paragraph that is itself longer than a whole chunk.
+
+    Gutenberg texts carry the occasional 2,000-word 'paragraph' - contents
+    blocks, unbroken letters, runs of verse. Splitting on blank lines alone
+    cannot honour a 325-word target, so oversized paragraphs are broken on
+    sentence endings instead. A single sentence longer than the target is
+    left alone; mid-sentence breaks read worse than a long chunk.
+    """
+    sentences = re.split(r'(?<=[.!?])\s+', paragraph)
+    pieces = []
+    current = []
+    count = 0
+
+    for sentence in sentences:
+        words = len(sentence.split())
+        if current and count + words > target_words:
+            pieces.append(" ".join(current))
+            current = []
+            count = 0
+        current.append(sentence)
+        count += words
+
+    if current:
+        pieces.append(" ".join(current))
+
+    return pieces
+
+
+def create_chunks(paragraphs, target_words=CHUNK_TARGET_WORDS):
+    """Splits paragraphs into chunks of roughly target_words.
+
+    Keeps the original rule: only break when adding the next paragraph would
+    overflow AND the chunk already carries its weight, so we never emit a
+    two-line fragment just because a long paragraph is coming.
+    """
+    # Break up anything already bigger than a chunk before grouping.
+    units = []
+    for para in paragraphs:
+        clean_para = para.strip()
+        if not clean_para:
+            continue
+        if len(clean_para.split()) > target_words:
+            units.extend(split_long_paragraph(clean_para, target_words))
+        else:
+            units.append(clean_para)
+
+    chunks = []
     current_chunk = []
     current_word_count = 0
     sequence = 1
-    
-    for para in paragraphs:
-        clean_para = para.strip()
-        if not clean_para: continue
-            
+
+    for clean_para in units:
         word_count = len(clean_para.split())
-        
-        # 1. Will adding this paragraph blow the limit?
+
         will_overflow = (current_word_count + word_count > target_words)
-        
-        # 2. Is the current chunk "meaty" enough to stand alone? (e.g. > 50% of target)
         is_substantial = (current_word_count > (target_words * 0.5))
-        
-        # Only split if BOTH are true
+
         if will_overflow and is_substantial and current_chunk:
-            chunk_content = "\n\n".join(current_chunk)
-            
-            memory_chunks.append({
-                "book_id": unique_book_id, # This is now unique (e.g. pg11_short)
+            chunks.append({
                 "sequence": sequence,
-                "edition": edition_name,
-                "content": chunk_content,
+                "content": "\n\n".join(current_chunk),
                 "word_count": current_word_count,
-                "recap": None, 
             })
-            
             sequence += 1
             current_chunk = []
             current_word_count = 0
-            
+
         current_chunk.append(clean_para)
         current_word_count += word_count
 
     if current_chunk:
-        chunk_content = "\n\n".join(current_chunk)
-        memory_chunks.append({
-            "book_id": unique_book_id,
+        chunks.append({
             "sequence": sequence,
-            "edition": edition_name,
             "content": "\n\n".join(current_chunk),
             "word_count": current_word_count,
-            "recap": None,
         })
-        
-    return memory_chunks, sequence
 
-def ingest_book(text, title, author, base_book_id, source_url):
+    return chunks
+
+
+def generate_recaps_for_book(conn, book_id, limit=None):
+    """Generates the chained 'story so far' recap for each chunk of a book.
+
+    Chunk N's recap covers everything up to and including chunk N, so a
+    delivery starting at chunk S reads chunk S-1's recap whatever
+    chunks_per_day is set to. The chain is the point and also the cost: the
+    calls cannot be parallelised within a book, and every chunk needs one.
+    That is why this never runs as part of a plain ingest.
+
+    Resumable: picks up after the last chunk that already has a recap, and
+    stops at the first failure rather than leaving a hole in the chain.
+    """
+    rows = conn.execute(
+        "SELECT sequence, content, recap FROM chunks WHERE book_id = ? ORDER BY sequence",
+        (book_id,),
+    ).fetchall()
+
+    if not rows:
+        print(f"   [Recaps] No chunks stored for '{book_id}' - ingest it first.")
+        return 0, 0.0
+
+    previous_recap = None
+    start_at = 0
+    for i, row in enumerate(rows):
+        if row["recap"]:
+            previous_recap = row["recap"]
+            start_at = i + 1
+        else:
+            break
+
+    todo = rows[start_at:]
+    if limit:
+        todo = todo[:limit]
+
+    if not todo:
+        print(f"   [Recaps] '{book_id}' already complete ({len(rows)} chunks).")
+        return 0, 0.0
+
+    print(f"   [Recaps] {len(todo)} of {len(rows)} chunks need a recap for '{book_id}'...")
+    calls = 0
+    started = time.time()
+
+    for row in todo:
+        summary = ai.generate_recap(row["content"], previous_recap=previous_recap)
+        calls += 1
+
+        if not summary:
+            print(f"   [Recaps] Nothing returned for chunk {row['sequence']}; stopping "
+                  f"here so the chain stays intact. Re-run to resume.")
+            break
+
+        conn.execute(
+            "UPDATE chunks SET recap = ? WHERE book_id = ? AND sequence = ?",
+            (summary, book_id, row["sequence"]),
+        )
+        previous_recap = summary
+
+        if calls % 25 == 0:
+            print(f"   [Recaps] {calls} done, {time.time() - started:.0f}s elapsed...")
+
+    elapsed = time.time() - started
+    per_call = elapsed / calls if calls else 0
+    print(f"   [Recaps] {calls} Gemini calls in {elapsed:.1f}s ({per_call:.2f}s per call).")
+    return calls, elapsed
+
+
+def ingest_book(text, title, author, book_id, source_url,
+                use_ai=True, with_recaps=False):
     # Prepare text
     text = text.replace('\r\n', '\n').replace('\r', '\n')
     paragraphs = text.split('\n\n')
-    
-    print(f"Processing '{title}' (Base ID: {base_book_id})...")
-    
-    # --- ENHANCEMENT ---
-    # Generate cover and blurb once for the base book
-    cover_url = download_cover(base_book_id)
-    description = generate_blurb(title, author)
-    
-    # Generate Editions
-    for edition_name, conf in EDITION_CONFIG.items():
-        suffix = conf["suffix"]
-        target_words = conf["words"]
-        
-        # 1. Determine Unique ID (e.g., pg11, pg11_short, pg11_long)
-        unique_book_id = f"{base_book_id}{suffix}"
-        
-        # 2. Cleanup Old Data for this specific edition
-        if db.books.find_one({"book_id": unique_book_id}):
-            db.books.delete_one({"book_id": unique_book_id})
-            db.chunks.delete_many({"book_id": unique_book_id})
 
-        print(f"  -> Generating '{edition_name}' edition ({target_words} words) as ID: {unique_book_id}...")
-        
-        chunks, total_chunks = create_edition_chunks(paragraphs, unique_book_id, edition_name, target_words)
-        
-        # 3. Insert Chunks
-        if chunks:
-            db.chunks.insert_many(chunks)
+    print(f"Processing '{title}' (ID: {book_id})...")
 
-        # 4. Insert Book Metadata (Separate entry for each edition)
-        book_doc = {
-            "book_id": unique_book_id,
-            "parent_id": base_book_id, # Link them together if needed later
-            "title": title,
-            "author": author,
-            "source_url": source_url,
-            "total_chunks": total_chunks,
-            "edition": edition_name,
-            "chunk_size": target_words,
-            "cover_url": cover_url,
-            "description": description
-        }
-        db.books.insert_one(book_doc)
+    cover_url = download_cover(book_id)
+    blurb = generate_blurb(title, author) if use_ai else None
 
-    print(f"Success! '{title}' ingested and enhanced.")
+    chunks = create_chunks(paragraphs)
+    if not chunks:
+        print(f"   [!] No text found in '{title}' - nothing stored.")
+        return
 
-def process_source(source, override_title=None, override_author=None, override_id=None):
+    total_words = sum(c["word_count"] for c in chunks)
+
+    conn = db.get_db()
+    try:
+        with db.transaction(conn):
+            # Re-ingesting replaces the book; the chunks go with it via
+            # ON DELETE CASCADE.
+            conn.execute("DELETE FROM books WHERE id = ?", (book_id,))
+            conn.execute(
+                """INSERT INTO books (id, title, author, blurb, cover_path,
+                                      source_url, total_chunks, total_words,
+                                      created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (book_id, title, author, blurb, cover_url, source_url,
+                 len(chunks), total_words, utc_now()),
+            )
+            conn.executemany(
+                """INSERT INTO chunks (book_id, sequence, content, word_count)
+                   VALUES (?, ?, ?, ?)""",
+                [(book_id, c["sequence"], c["content"], c["word_count"])
+                 for c in chunks],
+            )
+
+        print(f"  -> {len(chunks)} chunks, {total_words:,} words "
+              f"({CHUNK_TARGET_WORDS} words/chunk target)")
+
+        if with_recaps:
+            generate_recaps_for_book(conn, book_id)
+        else:
+            print("  -> Recaps not generated. Backfill later with --recaps-only.")
+    finally:
+        conn.close()
+
+    print(f"Success! '{title}' ingested.")
+
+
+def process_source(source, override_title=None, override_author=None,
+                   override_id=None, use_ai=True, with_recaps=False):
     try:
         url, derived_id = derive_metadata(source)
         book_id = override_id if override_id else derived_id
@@ -288,18 +388,41 @@ def process_source(source, override_title=None, override_author=None, override_i
         author = override_author if override_author else extract_author(raw_text)
         
         clean_content = clean_text(raw_text)
-        ingest_book(clean_content, title, author, book_id, url)
+        ingest_book(clean_content, title, author, book_id, url,
+                    use_ai=use_ai, with_recaps=with_recaps)
         
     except Exception as e:
         print(f"Error processing '{source}': {e}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Ingest books into DailyLitBits (Multi-Edition Support)")
-    parser.add_argument("source", help="Gutenberg ID, URL, or path to .txt file list")
-    parser.add_argument("--title", "-t", help="Override Title (Single mode only)")
-    parser.add_argument("--author", "-a", help="Override Author (Single mode only)")
-    parser.add_argument("--id", "-i", help="Override ID (Single mode only)")
+    parser = argparse.ArgumentParser(
+        description="Ingest books into dailyLitBits (SQLite, single chunk size)")
+    parser.add_argument("source", help="Gutenberg ID, URL, or path to a list file")
+    parser.add_argument("--title", "-t", help="Override Title (single mode only)")
+    parser.add_argument("--author", "-a", help="Override Author (single mode only)")
+    parser.add_argument("--id", "-i", help="Override ID (single mode only)")
+    parser.add_argument("--no-ai", action="store_true",
+                        help="Skip the blurb call too, so ingest makes no API calls")
+    parser.add_argument("--recaps", action="store_true",
+                        help="Also generate chained recaps: one Gemini call per "
+                             "chunk, sequential. Off by default because a whole "
+                             "library is tens of thousands of calls.")
+    parser.add_argument("--recaps-only", action="store_true",
+                        help="Backfill recaps for a book already in the database. "
+                             "No download, no re-chunking.")
+    parser.add_argument("--limit", type=int,
+                        help="With --recaps/--recaps-only, stop after N chunks. "
+                             "Useful for measuring what a full run would cost.")
     args = parser.parse_args()
+
+    if args.recaps_only:
+        book_id = args.id if args.id else derive_metadata(args.source)[1]
+        conn = db.get_db()
+        try:
+            generate_recaps_for_book(conn, book_id, limit=args.limit)
+        finally:
+            conn.close()
+        sys.exit(0)
 
     # BULK MODE
     if os.path.isfile(args.source):
@@ -308,8 +431,10 @@ if __name__ == "__main__":
             for line in f:
                 line = line.strip()
                 if line and not line.startswith("#"):
-                    process_source(line)
-                    time.sleep(1.0) 
+                    process_source(line, use_ai=not args.no_ai,
+                                   with_recaps=args.recaps)
+                    time.sleep(1.0)
     else:
         # SINGLE MODE
-        process_source(args.source, args.title, args.author, args.id)
+        process_source(args.source, args.title, args.author, args.id,
+                       use_ai=not args.no_ai, with_recaps=args.recaps)

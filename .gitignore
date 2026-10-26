@@ -1,6 +1,10 @@
 # Security (Keep secrets local!)
 .env
 
+# Local SQLite database (book text, and encrypted subscriber data later).
+# This repo is public - never commit it.
+data/
+
 # Python build artifacts
 __pycache__/
 *.pyc

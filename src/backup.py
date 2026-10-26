@@ -1,93 +1,106 @@
-from logger import log
-import os
-import datetime
-import subprocess
-import glob
-import sys
+"""Nightly backup of the SQLite database.
 
-# --- CONFIGURATION ---
-# Where to save files on the Host
+Uses SQLite's online backup API, so it is safe while the app is serving, and
+then opens the copy and runs an integrity check before calling it a success.
+
+That verification is the point. The previous version shelled out to mongodump
+without credentials and wrote 23-byte files containing nothing but an
+authorisation error, every night for seven months, while reporting success.
+A backup nobody has restored is just a file taking up space - the restore
+command is in CLAUDE.md, and it is one line.
+"""
+import datetime
+import glob
+import gzip
+import os
+import shutil
+import sqlite3
+import sys
+import time
+
+from dotenv import load_dotenv
+
+from logger import log
+
+# Cron runs this from /root, so the .env has to be named explicitly, and it
+# has to be loaded before config is imported.
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
+
+import config  # noqa: E402
+
 BACKUP_DIR = os.path.expanduser("~/backups")
-# The name of the container running Mongo (from BlueHorseshoe stack)
-CONTAINER_NAME = "mongo" 
-# How many days to keep backups before deleting old ones
 RETENTION_DAYS = 3
 
-def get_actual_container_name():
-    """Attempts to find the actual container name if the default fails."""
-    # First check if the default works
-    check_cmd = ["docker", "inspect", CONTAINER_NAME]
-    if subprocess.run(check_cmd, capture_output=True).returncode == 0:
-        return CONTAINER_NAME
-    
-    # If not, try to find it by labels
-    log(f"Container '{CONTAINER_NAME}' not found. Searching by labels...")
-    find_cmd = [
-        "docker", "ps", "--filter", "label=com.docker.compose.service=mongo",
-        "--format", "{{.Names}}"
-    ]
-    result = subprocess.run(find_cmd, capture_output=True, text=True)
-    names = result.stdout.strip().split('\n')
-    
-    if names and names[0]:
-        log(f"Found container: {names[0]}")
-        return names[0]
-    
-    return CONTAINER_NAME # Fallback to original
 
 def create_backup():
-    # 1. Ensure directory exists
-    if not os.path.exists(BACKUP_DIR):
-        os.makedirs(BACKUP_DIR)
-        log(f"Created backup directory: {BACKUP_DIR}")
-
-    # 2. Generate Filename
-    timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-    filename = f"dailylitbits_{timestamp}.archive.gz"
-    filepath = os.path.join(BACKUP_DIR, filename)
-
-    log(f"Starting backup: {filename}...")
-
-    # 3. Run mongodump via Docker
-    actual_name = get_actual_container_name()
-    try:
-        with open(filepath, "wb") as f:
-            cmd = ["docker", "exec", actual_name, "mongodump", "--db", "slow_reader_db", "--archive", "--gzip"]
-            
-            process = subprocess.run(cmd, stdout=f, stderr=subprocess.PIPE)
-            
-            if process.returncode != 0:
-                log(f"Error creating backup: {process.stderr.decode()}")
-                return False
-            
-        # Get file size
-        size_mb = os.path.getsize(filepath) / (1024 * 1024)
-        log(f"Success! Backup saved to {filepath} ({size_mb:.2f} MB)")
-        return True
-
-    except Exception as e:
-        log(f"Exception during backup: {e}")
+    if not os.path.exists(config.DB_PATH):
+        log(f"Error: no database at {config.DB_PATH}")
         return False
+
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+
+    stamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    plain_path = os.path.join(BACKUP_DIR, f"dailylitbits_{stamp}.db")
+    final_path = plain_path + ".gz"
+
+    log(f"Starting backup: {os.path.basename(final_path)}...")
+
+    try:
+        source = sqlite3.connect(f"file:{config.DB_PATH}?mode=ro", uri=True)
+        target = sqlite3.connect(plain_path)
+        with target:
+            source.backup(target)
+        source.close()
+        target.close()
+    except Exception as exc:
+        log(f"Error creating backup: {exc}")
+        if os.path.exists(plain_path):
+            os.remove(plain_path)
+        return False
+
+    # Verify the copy before trusting it.
+    try:
+        check = sqlite3.connect(plain_path)
+        result = check.execute("PRAGMA integrity_check").fetchone()[0]
+        books = check.execute("SELECT COUNT(*) FROM books").fetchone()[0]
+        chunks = check.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+        users = check.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        check.close()
+    except Exception as exc:
+        log(f"Error: backup copy will not open: {exc}")
+        os.remove(plain_path)
+        return False
+
+    if result != "ok":
+        log(f"Error: integrity check on the backup said '{result}'. Keeping old backups.")
+        os.remove(plain_path)
+        return False
+
+    with open(plain_path, "rb") as raw, gzip.open(final_path, "wb") as gz:
+        shutil.copyfileobj(raw, gz)
+    os.remove(plain_path)
+
+    size_mb = os.path.getsize(final_path) / (1024 * 1024)
+    log(f"Success! {os.path.basename(final_path)} ({size_mb:.2f} MB) - "
+        f"integrity ok, {books} books, {chunks} chunks, {users} users")
+    return True
+
 
 def cleanup_old_backups():
     log(f"Cleaning up backups older than {RETENTION_DAYS} days...")
-    now = time.time()
-    cutoff = now - (RETENTION_DAYS * 86400)
-    
-    # List all archive files in the dir
-    files = glob.glob(os.path.join(BACKUP_DIR, "*.archive.gz"))
-    
-    count = 0
-    for f in files:
-        if os.path.getmtime(f) < cutoff:
-            os.remove(f)
-            log(f"Deleted old backup: {os.path.basename(f)}")
-            count += 1
-            
-    if count == 0:
+    cutoff = time.time() - (RETENTION_DAYS * 86400)
+
+    removed = 0
+    for path in glob.glob(os.path.join(BACKUP_DIR, "dailylitbits_*.db.gz")):
+        if os.path.getmtime(path) < cutoff:
+            os.remove(path)
+            log(f"Deleted old backup: {os.path.basename(path)}")
+            removed += 1
+
+    if removed == 0:
         log("No old backups to delete.")
 
-import time # Imported here for the cleanup function logic
 
 if __name__ == "__main__":
     if create_backup():

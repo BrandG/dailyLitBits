@@ -1,292 +1,460 @@
-from logger import log
-import secrets
-from fastapi.responses import HTMLResponse, RedirectResponse
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from fastapi import FastAPI, Request, Form, Depends, HTTPException, status
-from cryptography.fernet import Fernet
-from fastapi.templating import Jinja2Templates
-from fastapi.responses import HTMLResponse
-from pymongo import MongoClient
-from bson import ObjectId
-import config
-from user_manager import UserManager
-from subscribe import subscribe_user 
-from security import verify_unsub_token, verify_binge_token
-import dispatch 
-from datetime import datetime
-import security # Ensure this is imported
-from fastapi.staticfiles import StaticFiles
-import pymongo # Added for DuplicateKeyError
-# from sendgrid import SendGridAPIClient <-- Removed
-# from sendgrid.helpers.mail import Mail <-- Removed
+"""dailyLitBits web app.
 
-# Add this AFTER creating the app = FastAPI() line
+Identity is one thing only: a signed link mailed to an email address. There is
+no username, no password and no "claimed" account. `users.role` decides who is
+an admin, so /admin is a permission on the ordinary user row rather than a
+second login mechanism (it does want a fresh, short-lived token - see
+security.py for why).
+
+Data lives in SQLite (see db.py). Several queries alias columns to the names
+the templates already use (id AS book_id, blurb AS description) rather than
+churn the templates for a rename.
+"""
+from logger import log
+from datetime import datetime, timezone
+
+from fastapi import FastAPI, Request, Form, Depends
+from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+
+import config
+import db
+import dispatch
+import security
+from security import verify_unsub_token, verify_next_token, verify_dashboard_token
+from user_manager import UserManager
+
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
-
 templates = Jinja2Templates(directory="templates")
 
-security_auth = HTTPBasic()
-cipher = Fernet(config.ENCRYPTION_KEY)
+BASE_URL = "https://dailylitbits.com"
 
-# --- ADMIN CREDENTIALS ---
-# In a real production app, put these in your .env file!
-ADMIN_USER = "admin"
-ADMIN_PASS = "change_this_password"
+# Create the schema once at start-up, not on every request.
+_startup_conn = db.connect()
+db.init_db(_startup_conn)
+_startup_conn.close()
 
-def get_current_admin(credentials: HTTPBasicCredentials = Depends(security_auth)):
-    """Checks basic auth username/password"""
-    is_user_ok = secrets.compare_digest(credentials.username, ADMIN_USER)
-    is_pass_ok = secrets.compare_digest(credentials.password, ADMIN_PASS)
 
-    if not (is_user_ok and is_pass_ok):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect email or password",
-            headers={"WWW-Authenticate": "Basic"},
-        )
-    return credentials.username
+def utc_now():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-async def get_db():
-    client = MongoClient(config.MONGO_URI)
+
+def get_db():
+    conn = db.connect()
     try:
-        yield client[config.DB_NAME]
+        yield conn
     finally:
-        client.close()
+        conn.close()
+
+
+def invalid_link(message="Invalid or expired link"):
+    return HTMLResponse(f"<h1>{message}</h1>", status_code=400)
+
+
+def simple_page(heading, body, colour="#2c3e50"):
+    """The small confirmation pages. Matches the look of the originals."""
+    return HTMLResponse(f"""
+    <html>
+    <body style="font-family: sans-serif; text-align: center; padding-top: 50px; color: #333;">
+        <div style="max-width: 500px; margin: 0 auto;">
+            <h1 style="color: {colour};">{heading}</h1>
+            {body}
+            <p style="margin-top: 30px;"><a href="/" style="color: #666;">Return to DailyLitBits</a></p>
+        </div>
+    </body>
+    </html>
+    """)
+
+
+def user_from_token(conn, token):
+    """Resolves a dashboard token to a user row, or None."""
+    user_id = verify_dashboard_token(token)
+    if not user_id:
+        return None
+    return UserManager(conn).get_user(int(user_id))
+
+
+def owned_subscription(conn, sub_id, user_id):
+    """A subscription, but only if it belongs to this user."""
+    return conn.execute(
+        "SELECT * FROM subscriptions WHERE id = ? AND user_id = ?", (sub_id, user_id)
+    ).fetchone()
+
+
+def book_choices(conn):
+    return conn.execute(
+        "SELECT id AS book_id, title, author FROM books ORDER BY title"
+    ).fetchall()
+
+
+# --- EMAILS ---
 
 def send_welcome_email(to_email, book_title, dashboard_link, is_queue=False):
-    """Sends a welcome email with the magic link."""
     if is_queue:
         subject = f"Added to Queue: {book_title}"
-        body = f"""
-        <html>
-        <body style="font-family: sans-serif; padding: 20px;">
-            <h2 style="color: #2c3e50;">You're in the queue!</h2>
-            <p><strong>{book_title}</strong> has been added to your reading list.</p>
-            <p>It will start automatically once you finish your current book.</p>
-            <p><a href="{dashboard_link}" style="background-color: #28a745; color: white; padding: 10px 15px; text-decoration: none; border-radius: 5px;">Go to Dashboard</a></p>
-        </body>
-        </html>
-        """
+        intro = (f"<h2 style=\"color: #2c3e50;\">You're in the queue!</h2>"
+                 f"<p><strong>{book_title}</strong> has been added to your reading list.</p>"
+                 f"<p>It will start automatically once you finish your current book.</p>")
     else:
         subject = f"Welcome to dailyLitBits: {book_title}"
-        body = f"""
-        <html>
-        <body style="font-family: sans-serif; padding: 20px;">
-            <h2 style="color: #2c3e50;">Welcome to dailyLitBits!</h2>
-            <p>You have successfully subscribed to <strong>{book_title}</strong>.</p>
-            <p>Your first part will arrive tomorrow morning at 6:00 AM.</p>
-            <p>You can manage your subscription, view your progress, or read ahead using your personal dashboard:</p>
-            <p><a href="{dashboard_link}" style="background-color: #28a745; color: white; padding: 10px 15px; text-decoration: none; border-radius: 5px;">Access My Dashboard</a></p>
-            <br>
-            <p style="color: #777; font-size: 12px;">(You can claim your account on the dashboard to save your history permanently.)</p>
-        </body>
-        </html>
-        """
-    
+        intro = (f"<h2 style=\"color: #2c3e50;\">Welcome to dailyLitBits!</h2>"
+                 f"<p>You have successfully subscribed to <strong>{book_title}</strong>.</p>"
+                 f"<p>Your first part arrives tomorrow morning.</p>")
+
+    body = f"""
+    <html>
+    <body style="font-family: sans-serif; padding: 20px;">
+        {intro}
+        <p>Use your personal link to manage your subscription, change how much
+        arrives each day, or read ahead:</p>
+        <p><a href="{dashboard_link}" style="background-color: #28a745; color: white; padding: 10px 15px; text-decoration: none; border-radius: 5px;">Open my dashboard</a></p>
+        <br>
+        <p style="color: #777; font-size: 12px;">Keep this email - the link is how you get back in.
+        You can always have it sent again from the site.</p>
+    </body>
+    </html>
+    """
+
     if dispatch.send_via_brevo(to_email, subject, body):
-        log(f"[INFO] Welcome email sent to {to_email}")
+        log("[INFO] Welcome email sent")
     else:
-        log(f"[ERROR] Failed to send welcome email to {to_email}")
+        log("[ERROR] Failed to send welcome email")
+
+
+def send_dashboard_link(to_email, dashboard_link):
+    body = f"""
+    <html>
+    <body style="font-family: sans-serif; padding: 20px;">
+        <h2 style="color: #2c3e50;">Your dashboard link</h2>
+        <p>Here is your way back in:</p>
+        <p><a href="{dashboard_link}" style="background-color: #28a745; color: white; padding: 10px 15px; text-decoration: none; border-radius: 5px;">Open my dashboard</a></p>
+        <br>
+        <p style="color: #777; font-size: 12px;">If you did not ask for this, you can ignore it.</p>
+    </body>
+    </html>
+    """
+    return dispatch.send_via_brevo(to_email, "Your dailyLitBits dashboard link", body)
+
+
+# --- PUBLIC PAGES ---
 
 @app.get("/", response_class=HTMLResponse)
-async def read_root(request: Request, db: MongoClient = Depends(get_db)):
-    # FILTER: Only show Standard Edition (750 words) to keep the list clean
-    books = list(db.books.find(
-        {"chunk_size": 750}, 
-        {"book_id": 1, "title": 1, "author": 1, "_id": 0}
-    ).sort("title", 1)) # Added sort for niceness
-    
+async def read_root(request: Request, conn=Depends(get_db)):
     return templates.TemplateResponse("index.html", {
-        "request": request, "books": books
+        "request": request, "books": book_choices(conn)
     })
+
+
+@app.get("/library", response_class=HTMLResponse)
+async def library(request: Request, conn=Depends(get_db)):
+    rows = conn.execute(
+        """SELECT id AS book_id, title, author, total_chunks,
+                  blurb AS description, cover_path
+           FROM books ORDER BY title"""
+    ).fetchall()
+
+    books = []
+    for row in rows:
+        book = dict(row)
+        # Prefer the cover we downloaded at ingest; fall back to Gutenberg.
+        if book.get("cover_path"):
+            book["cover_url"] = book["cover_path"]
+        else:
+            clean_id = book["book_id"].replace("pg", "")
+            book["cover_url"] = (
+                f"https://www.gutenberg.org/cache/epub/{clean_id}/pg{clean_id}.cover.medium.jpg"
+                if clean_id.isdigit() else "/static/covers/placeholder.jpg"
+            )
+        books.append(book)
+
+    return templates.TemplateResponse("library.html", {"request": request, "books": books})
+
+
+@app.get("/privacy", response_class=HTMLResponse)
+async def privacy(request: Request):
+    return templates.TemplateResponse("privacy.html", {"request": request})
+
+
+@app.get("/intro", response_class=HTMLResponse)
+async def intro_page(request: Request):
+    return templates.TemplateResponse("intro.html", {"request": request})
+
+
+# --- SIGNUP ---
 
 @app.post("/signup", response_class=HTMLResponse)
 async def handle_signup(
     request: Request,
     email: str = Form(...),
     book_id: str = Form(...),
-    timezone: str = Form("UTC"),
-    db: MongoClient = Depends(get_db)
+    timezone_name: str = Form("UTC", alias="timezone"),
+    chunks_per_day: int = Form(2),
+    conn=Depends(get_db),
 ):
-    manager = UserManager(db)
-
-    # 1. Create User (or get existing ID)
-    try:
-        user_id = manager.create_user(email, timezone=timezone)
-    except ValueError:
-        # Email exists. Fetch the existing user.
-        existing_user = manager.get_user_by_email(email)
-        if not existing_user:
-             return HTMLResponse("<h1>Error: Email conflict but user not found.</h1>", status_code=500)
-        user_id = existing_user['_id']
-        log(f"[INFO] Existing user found: {user_id}. Proceeding with subscription.")
-    except pymongo.errors.DuplicateKeyError as e: 
-        log(f"[ERROR] Signup Failed: {type(e).__name__}: {e}")
-        return HTMLResponse("<h1>Error: Could not create user. Email might be taken.</h1>", status_code=500)
-
-    # 2. Check for Duplicate Subscription to THIS book
-    existing_sub = db.subscriptions.find_one({
-        "user_id": user_id, 
-        "book_id": book_id,
-        "status": {"$in": ["active", "queued", "completed"]}
-    })
-    
-    if existing_sub:
-        books = list(db.books.find({}, {"book_id": 1, "title": 1, "author": 1, "_id": 0}))
-        book_info = db.books.find_one({"book_id": book_id})
-        book_title = book_info['title'] if book_info else book_id
-        
-        status_msg = existing_sub['status']
-        if status_msg == "active":
-            msg = f"You are already currently reading '{book_title}'."
-        elif status_msg == "queued":
-            msg = f"'{book_title}' is already in your queue."
-        else:
-            msg = f"You have already finished '{book_title}'."
-
+    book = conn.execute("SELECT id, title FROM books WHERE id = ?", (book_id,)).fetchone()
+    if not book:
         return templates.TemplateResponse("index.html", {
-            "request": request,
-            "books": books,
-            "message": msg
+            "request": request, "books": book_choices(conn),
+            "message": "That book is not in the library.",
         })
 
-    # 3. Create Subscription
-    # Check if user already has an active subscription
-    active_subs_count = db.subscriptions.count_documents({"user_id": user_id, "status": "active"})
-
-    new_status = "active" if active_subs_count == 0 else "queued"
-    
-    sub_data = {
-        "user_id": user_id,
-        "book_id": book_id,
-        "current_sequence": 1,
-        "status": new_status,
-        "created_at": datetime.now(),
-        "last_sent": None
-    }
+    chunks_per_day = max(1, min(chunks_per_day, 12))
+    manager = UserManager(conn)
 
     try:
-        result = db.subscriptions.insert_one(sub_data)
-        sub_id = result.inserted_id
-    except Exception as e:
-        log(f"[ERROR] Subscription Failed: {e}")
-        return HTMLResponse("<h1>Error: Could not create subscription.</h1>", status_code=500)
+        with db.transaction(conn):
+            user_id, _ = manager.get_or_create_user(email, timezone_name=timezone_name)
 
-    # 4. Success Response & Email
-    books = list(db.books.find({}, {"book_id": 1, "title": 1, "author": 1, "_id": 0}))
-    book_info = db.books.find_one({"book_id": book_id})
-    book_title = book_info['title'] if book_info else book_id
-    
-    # Generate Token for Magic Link
-    token = security.generate_binge_token(sub_id)
-    # NOTE: In production, use the actual domain from config or request.base_url
-    dashboard_link = f"https://dailylitbits.com/profile?token={token}" 
-    
-    # Send Email
-    send_welcome_email(email, book_title, dashboard_link, is_queue=(new_status == "queued"))
+            existing = conn.execute(
+                """SELECT status FROM subscriptions
+                   WHERE user_id = ? AND book_id = ?
+                     AND status IN ('active', 'queued', 'paused', 'completed')""",
+                (user_id, book_id),
+            ).fetchone()
 
-    if new_status == "queued":
-        message = f"Added '{book_title}' to your reading queue. Check your email for the confirmation."
-    else: # new_status == "active"
-        message = f"Success! You will start receiving '{book_title}' tomorrow. Check your email for your dashboard link."
+            if existing:
+                already = {
+                    "active": f"You are already reading '{book['title']}'.",
+                    "paused": f"'{book['title']}' is paused - resume it from your dashboard.",
+                    "queued": f"'{book['title']}' is already in your queue.",
+                    "completed": f"You have already finished '{book['title']}'.",
+                }[existing["status"]]
+                raise _AlreadySubscribed(already)
+
+            # First book starts now; anything after it waits its turn.
+            active_count = conn.execute(
+                "SELECT COUNT(*) FROM subscriptions WHERE user_id = ? AND status = 'active'",
+                (user_id,),
+            ).fetchone()[0]
+            status = "active" if active_count == 0 else "queued"
+
+            conn.execute(
+                """INSERT INTO subscriptions
+                       (user_id, book_id, status, current_sequence, chunks_per_day,
+                        delivery_hour, last_sent, created_at)
+                   VALUES (?, ?, ?, 1, ?, ?, NULL, ?)""",
+                (user_id, book_id, status, chunks_per_day, dispatch.TARGET_HOUR, utc_now()),
+            )
+    except _AlreadySubscribed as already:
+        return templates.TemplateResponse("index.html", {
+            "request": request, "books": book_choices(conn), "message": str(already),
+        })
+    except Exception as exc:
+        log(f"[ERROR] Signup failed: {type(exc).__name__}: {exc}")
+        return templates.TemplateResponse("index.html", {
+            "request": request, "books": book_choices(conn),
+            "message": "Something went wrong creating your subscription.",
+        })
+
+    token = security.generate_dashboard_token(user_id)
+    send_welcome_email(email, book["title"], f"{BASE_URL}/profile?token={token}",
+                       is_queue=(status == "queued"))
+
+    message = (f"Added '{book['title']}' to your queue. Check your email."
+               if status == "queued" else
+               f"Success! '{book['title']}' starts tomorrow. Check your email for your dashboard link.")
 
     return templates.TemplateResponse("index.html", {
-        "request": request,
-        "books": books,
-        "message": message
+        "request": request, "books": book_choices(conn), "message": message,
     })
 
-@app.get("/next", response_class=HTMLResponse)
-async def trigger_next_chapter(request: Request, token: str, db: MongoClient = Depends(get_db)):
-    sub_id_str = verify_binge_token(token)
-    
-    if not sub_id_str:
-        return HTMLResponse(content="<h1>Invalid or Expired Link</h1>", status_code=400)
-    
-    success, msg = dispatch.process_subscription(sub_id_str, trigger='binge', db_session=db, cipher_obj=cipher)
-    
-    color = "#28a745" if success else "#dc3545"
-    
-    html_content = f"""
-    <html>
-    <body style="font-family: sans-serif; text-align: center; padding-top: 50px; color: #333;">
-        <div style="max-width: 500px; margin: 0 auto;">
-            <h1 style="color: {color};">{'On its way!' if success else 'Hold on...'}</h1>
-            <p style="font-size: 18px;">{msg}</p>
-            <p style="margin-top: 30px;"><a href="/" style="color: #666;">Return to DailyLitBits</a></p>
-        </div>
-    </body>
-    </html>
-    """
-    return HTMLResponse(content=html_content)
 
-@app.get("/admin", response_class=HTMLResponse)
-async def admin_dashboard(request: Request, admin: str = Depends(get_current_admin), db: MongoClient = Depends(get_db)):
+class _AlreadySubscribed(Exception):
+    """Signals a duplicate subscription so the transaction unwinds cleanly."""
 
-    # 1. Fetch all subscriptions
-    subs = list(db.subscriptions.find({}))
 
-    user_data = []
+# --- GETTING BACK IN (replaces username/password login) ---
 
-    for sub in subs:
-        # Get User Email (Decrypt it)
-        user = db.users.find_one({"_id": sub['user_id']})
-        email_display = "Unknown"
-        timezone = "UTC"
-        if user:
-            try:
-                email_display = cipher.decrypt(user['email_enc']).decode()
-                timezone = user.get('timezone', 'UTC')
-            except:
-                email_display = "[Decryption Failed]"
+@app.get("/login", response_class=HTMLResponse)
+async def login_page(request: Request):
+    return templates.TemplateResponse("login.html", {"request": request})
 
-        # Get Book Info
-        book = db.books.find_one({"book_id": sub['book_id']})
-        if book:
-            book_title = book.get('title', sub['book_id'])
-            total_chunks = book.get('total_chunks', 1)
-        else:
-            book_title = sub['book_id']
-            total_chunks = 1
 
-        if total_chunks == 0: total_chunks = 1 # avoid div by zero
+@app.post("/login", response_class=HTMLResponse)
+async def handle_login(request: Request, email: str = Form(...), conn=Depends(get_db)):
+    user = UserManager(conn).get_user_by_email(email)
 
-        # Calculate Progress
-        current = sub.get('current_sequence', 1)
-        percent = int((current / total_chunks) * 100)
+    # Always say the same thing: whether an address is registered is not
+    # something a stranger should be able to probe.
+    if user:
+        send_dashboard_link(email, f"{BASE_URL}/profile?token="
+                                   f"{security.generate_dashboard_token(user['id'])}")
 
-        # Format Last Sent
-        last_sent_raw = sub.get('last_sent')
-        last_sent = last_sent_raw.strftime("%Y-%m-%d %H:%M") if last_sent_raw else "Never"
+    return templates.TemplateResponse("login.html", {
+        "request": request,
+        "message": "If that address has a subscription, its dashboard link is on its way.",
+    })
 
-        user_data.append({
-            "email": email_display,
-            "timezone": timezone,
-            "book_title": book_title,
-            "current": current,
-            "total": total_chunks,
-            "percent": percent,
-            "status": sub.get("status", "unknown"),
-            "last_sent": last_sent
+
+# --- DASHBOARD ---
+
+@app.get("/profile", response_class=HTMLResponse)
+async def profile_page(request: Request, token: str, conn=Depends(get_db)):
+    user = user_from_token(conn, token)
+    if not user:
+        return invalid_link()
+
+    current = conn.execute(
+        """SELECT * FROM subscriptions WHERE user_id = ?
+             AND status IN ('active', 'paused')
+           ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, created_at LIMIT 1""",
+        (user["id"],),
+    ).fetchone()
+
+    queued = conn.execute(
+        """SELECT s.id AS subscription_id, b.id AS book_id, b.title, b.author
+           FROM subscriptions s JOIN books b ON b.id = s.book_id
+           WHERE s.user_id = ? AND s.status = 'queued' ORDER BY s.created_at""",
+        (user["id"],),
+    ).fetchall()
+
+    context = {
+        "request": request,
+        "token": token,
+        "user_tz": user["timezone"],
+        "is_admin": user["role"] == "admin",
+        "queued_books": [dict(row) for row in queued],
+        "sub_id": None,
+        "book_title": None,
+    }
+
+    if current:
+        book = conn.execute("SELECT * FROM books WHERE id = ?",
+                            (current["book_id"],)).fetchone()
+        total = (book["total_chunks"] if book and book["total_chunks"] else 1)
+        started = dispatch.parse_ts(current["created_at"])
+
+        context.update({
+            "sub_id": current["id"],
+            "book_title": book["title"] if book else current["book_id"],
+            "book_author": (book["author"] if book else None) or "Unknown",
+            "current": current["current_sequence"],
+            "total": total,
+            "percent": min(int((current["current_sequence"] / total) * 100), 100),
+            "start_date": started.strftime("%b %d, %Y") if started else "Unknown",
+            "status": current["status"],
+            "delivery_hour": current["delivery_hour"],
+            "chunks_per_day": current["chunks_per_day"],
         })
 
-    return templates.TemplateResponse("admin.html", {
-        "request": request,
-        "users": user_data
-    })
+    return templates.TemplateResponse("dashboard.html", context)
 
-# --- NEW: STEP 1 - SHOW CONFIRMATION PAGE ---
+
+@app.post("/toggle_pause", response_class=HTMLResponse)
+async def toggle_pause(token: str = Form(...), sub_id: int = Form(...), conn=Depends(get_db)):
+    user = user_from_token(conn, token)
+    if not user:
+        return invalid_link()
+
+    sub = owned_subscription(conn, sub_id, user["id"])
+    if not sub:
+        return invalid_link("Subscription not found")
+
+    conn.execute("UPDATE subscriptions SET status = ? WHERE id = ?",
+                 ("paused" if sub["status"] == "active" else "active", sub_id))
+    return RedirectResponse(url=f"/profile?token={token}", status_code=303)
+
+
+@app.post("/update_preferences", response_class=HTMLResponse)
+async def update_preferences(
+    token: str = Form(...),
+    sub_id: int = Form(...),
+    timezone_name: str = Form(..., alias="timezone"),
+    delivery_hour: int = Form(...),
+    chunks_per_day: int = Form(...),
+    conn=Depends(get_db),
+):
+    user = user_from_token(conn, token)
+    if not user:
+        return invalid_link()
+
+    sub = owned_subscription(conn, sub_id, user["id"])
+    if not sub:
+        return invalid_link("Subscription not found")
+
+    # Changing how much arrives does NOT reset progress - that was the whole
+    # point of dropping the three-edition scheme.
+    with db.transaction(conn):
+        UserManager(conn).set_timezone(user["id"], timezone_name)
+        conn.execute(
+            "UPDATE subscriptions SET delivery_hour = ?, chunks_per_day = ? WHERE id = ?",
+            (max(0, min(delivery_hour, 23)), max(1, min(chunks_per_day, 12)), sub_id),
+        )
+
+    return RedirectResponse(url=f"/profile?token={token}", status_code=303)
+
+
+@app.get("/switch_book", response_class=HTMLResponse)
+async def switch_book(token: str, new_book_id: str, conn=Depends(get_db)):
+    """Make this book the one arriving now. Used by the queue and the
+    suggestions in the victory email."""
+    user = user_from_token(conn, token)
+    if not user:
+        return invalid_link()
+
+    book = conn.execute("SELECT id, title FROM books WHERE id = ?", (new_book_id,)).fetchone()
+    if not book:
+        return HTMLResponse("<h1>Book not found</h1>", status_code=404)
+
+    with db.transaction(conn):
+        # Whatever they were reading steps aside, keeping its place.
+        conn.execute(
+            """UPDATE subscriptions SET status = 'queued'
+               WHERE user_id = ? AND status IN ('active', 'paused')""",
+            (user["id"],),
+        )
+
+        existing = conn.execute(
+            """SELECT * FROM subscriptions WHERE user_id = ? AND book_id = ?
+               ORDER BY created_at DESC LIMIT 1""",
+            (user["id"], new_book_id),
+        ).fetchone()
+
+        if existing and existing["status"] in ("queued", "paused"):
+            # Resume where they left off rather than restarting the book.
+            conn.execute(
+                "UPDATE subscriptions SET status = 'active', last_sent = NULL WHERE id = ?",
+                (existing["id"],),
+            )
+        else:
+            conn.execute(
+                """INSERT INTO subscriptions
+                       (user_id, book_id, status, current_sequence, chunks_per_day,
+                        delivery_hour, last_sent, created_at)
+                   VALUES (?, ?, 'active', 1, 2, ?, NULL, ?)""",
+                (user["id"], new_book_id, dispatch.TARGET_HOUR, utc_now()),
+            )
+
+    return simple_page(
+        "You're switched!",
+        f"<p style=\"font-size: 18px;\">You are now reading <strong>{book['title']}</strong>.</p>"
+        f"<p>Your next part arrives tomorrow morning.</p>",
+        colour="#28a745",
+    )
+
+
+# --- EMAIL LINKS (scoped to one subscription) ---
+
+@app.get("/next", response_class=HTMLResponse)
+async def trigger_next_chapter(token: str, conn=Depends(get_db)):
+    sub_id = verify_next_token(token)
+    if not sub_id:
+        return invalid_link()
+
+    ok, message = dispatch.process_subscription(int(sub_id), trigger="next", conn=conn)
+    return simple_page("On its way!" if ok else "Hold on...",
+                       f"<p style=\"font-size: 18px;\">{message}</p>",
+                       colour="#28a745" if ok else "#dc3545")
+
+
 @app.get("/unsubscribe", response_class=HTMLResponse)
-async def unsubscribe_confirm(request: Request, token: str, db: MongoClient = Depends(get_db)):
-    # Just verify token validity, don't unsubscribe yet
-    sub_id_str = verify_unsub_token(token)
-    
-    if not sub_id_str:
-        return HTMLResponse(content="<h1>Invalid or Expired Link</h1>", status_code=400)
+async def unsubscribe_confirm(request: Request, token: str, conn=Depends(get_db)):
+    if not verify_unsub_token(token):
+        return invalid_link()
 
-    # Show a confirmation button
-    html_content = f"""
+    return HTMLResponse(f"""
     <html>
     <body style="font-family: sans-serif; text-align: center; padding-top: 50px;">
         <div style="max-width: 500px; margin: 0 auto;">
@@ -302,404 +470,89 @@ async def unsubscribe_confirm(request: Request, token: str, db: MongoClient = De
         </div>
     </body>
     </html>
-    """
-    return HTMLResponse(content=html_content)
+    """)
 
-# --- NEW: STEP 2 - ACTUALLY UNSUBSCRIBE ---
+
 @app.post("/unsubscribe", response_class=HTMLResponse)
-async def unsubscribe_process(request: Request, token: str = Form(...), db: MongoClient = Depends(get_db)):
-    sub_id_str = verify_unsub_token(token)
-    
-    if not sub_id_str:
-        return HTMLResponse(content="<h1>Invalid or Expired Link</h1>", status_code=400)
+async def unsubscribe_process(token: str = Form(...), conn=Depends(get_db)):
+    sub_id = verify_unsub_token(token)
+    if not sub_id:
+        return invalid_link()
 
-    result = db.subscriptions.update_one(
-        {"_id": ObjectId(sub_id_str)}, 
-        {"$set": {"status": "unsubscribed"}}
+    cur = conn.execute(
+        "UPDATE subscriptions SET status = 'unsubscribed' WHERE id = ? AND status != 'unsubscribed'",
+        (int(sub_id),),
+    )
+    return simple_page(
+        "Unsubscribe",
+        "<p>You have been unsubscribed.</p>" if cur.rowcount
+        else "<p>That subscription was already closed.</p>",
     )
 
-    msg = "You have been successfully unsubscribed." if result.modified_count > 0 else "Subscription not found or already unsubscribed."
 
-    html_content = f"""
-    <html>
-    <body style="font-family: sans-serif; text-align: center; padding-top: 50px;">
-        <h1>Unsubscribe</h1>
-        <p>{msg}</p>
-        <p><a href="/">Return to DailyLitBits</a></p>
-    </body>
-    </html>
-    """
-    return HTMLResponse(content=html_content)
-
-# --- NEW: ONE-CLICK BOOK SWITCH ---
-@app.get("/switch_book", response_class=HTMLResponse)
-async def switch_book(request: Request, token: str, new_book_id: str, db: MongoClient = Depends(get_db)):
-
-    # 1. Verify User
-    sub_id_str = verify_binge_token(token)
-    if not sub_id_str:
-        return HTMLResponse(content="<h1>Invalid or Expired Link</h1>", status_code=400)
-
-    # 2. Get Book Info (for the success message)
-    new_book = db.books.find_one({"book_id": new_book_id})
-    if not new_book:
-        return HTMLResponse(content="<h1>Book not found</h1>", status_code=404)
-
-    # 3. Reset Subscription
-    # We keep the same subscription ID but change the book and reset the counter
-    db.subscriptions.update_one(
-        {"_id": ObjectId(sub_id_str)},
-        {
-            "$set": {
-                "book_id": new_book_id,
-                "current_sequence": 1,
-                "status": "active",
-                "created_at": datetime.now(), # Reset start time for stats
-                "last_sent": None # Allows them to receive Part 1 immediately if they want
-            }
-        }
-    )
-
-    # 4. Success Page
-    html_content = f"""
-    <html>
-    <body style="font-family: sans-serif; text-align: center; padding-top: 50px; color: #333;">
-        <div style="max-width: 500px; margin: 0 auto;">
-            <h1 style="color: #28a745;">You're Switched!</h1>
-            <p style="font-size: 18px;">You are now reading <strong>{new_book['title']}</strong>.</p>
-            <p>Your first part will arrive tomorrow morning.</p>
-            <p style="font-size: 14px; color: #666; margin-top: 30px;">(Or check your email—we might slip the first part in sooner!)</p>
-            <p style="margin-top: 30px;"><a href="/" style="color: #666;">Return to DailyLitBits</a></p>
-        </div>
-    </body>
-    </html>
-    """
-    return HTMLResponse(content=html_content)
-
-
-@app.post("/claim_profile", response_class=HTMLResponse)
-async def process_claim(
-    request: Request,
-    token: str = Form(...),
-    username: str = Form(...),
-    password: str = Form(...),
-    db: MongoClient = Depends(get_db)
-):
-
-    # 1. Verify Token again
-    sub_id_str = verify_binge_token(token)
-    if not sub_id_str:
-        return HTMLResponse(content="<h1>Invalid or Expired Link</h1>", status_code=400)
-
-    sub = db.subscriptions.find_one({"_id": ObjectId(sub_id_str)})
-    if not sub: return HTMLResponse("Sub not found")
-
-    # 2. Attempt Claim
-    manager = UserManager(db)
-    print(f"[DEBUG] Attempting claim for User {sub['user_id']} with username '{username}'")
-
-    success, msg = manager.claim_account(sub['user_id'], username, password)
-    print(f"[DEBUG] Claim Result: Success={success}, Msg='{msg}'") 
-
-
-    if not success:
-        # Show form again with error
-        return templates.TemplateResponse("claim_profile.html", {
-            "request": request,
-            "token": token,
-            "error": msg # e.g. "Username taken"
-        })
-
-    # 3. Success!
-    return RedirectResponse(url=f"/profile?token={token}", status_code=303)
-
-
-@app.get("/profile", response_class=HTMLResponse)
-async def profile_page(request: Request, token: str, db: MongoClient = Depends(get_db)):
-
-    # 1. Verify Token
-    sub_id_str = verify_binge_token(token)
-    if not sub_id_str:
-        return HTMLResponse(content="<h1>Invalid or Expired Link</h1>", status_code=400)
-
-    # 2. Get Data
-    sub = db.subscriptions.find_one({"_id": ObjectId(sub_id_str)})
-    if not sub: return HTMLResponse("Sub not found", status_code=404)
-
-    user = db.users.find_one({"_id": sub['user_id']})
-
-    # If UNCLAIMED, show the claim form (Goal 1 logic)
-    if not user.get('is_claimed'):
-        return templates.TemplateResponse("claim_profile.html", {
-            "request": request,
-            "token": token
-        })
-
-    # If CLAIMED, show the Dashboard (Goal 2 logic)
-    # Fetch Book Info
-    book = db.books.find_one({"book_id": sub['book_id']})
-
-    # Calc Stats
-    current = sub.get('current_sequence', 1)
-    total = book.get('total_chunks', 100) if book else 100
-    percent = int((current / total) * 100)
-
-    start_date = sub.get('created_at')
-    start_str = start_date.strftime('%b %d, %Y') if start_date else "Unknown"
-
-    # DETERMINE CURRENT EDITION
-    book_id = sub['book_id']
-    current_edition = "standard"
-    edition_label = "Standard (~750 words)"
-    
-    if book_id.endswith("_short"):
-        current_edition = "short"
-        edition_label = "Short (~325 words)"
-    elif book_id.endswith("_long"):
-        current_edition = "long"
-        edition_label = "Long (~1500 words)"
-
-    # Fetch queued books for the 'Up Next' section
-    queued_subscriptions = list(db.subscriptions.find(
-        {"user_id": sub['user_id'], "status": "queued"},
-        sort=[("created_at", 1)] # Oldest first
-    ))
-
-    queued_books_data = []
-    for q_sub in queued_subscriptions:
-        q_book = db.books.find_one({"book_id": q_sub['book_id']})
-        if q_book:
-            queued_books_data.append({
-                "title": q_book.get('title', q_sub['book_id']),
-                "author": q_book.get('author', 'Unknown Author'),
-                "book_id": q_book['book_id'],
-                "subscription_id": str(q_sub['_id'])
-            })
-
-    # Add user timezone and delivery hour to context if missing
-    user_tz = user.get('timezone', 'UTC')
-    delivery_hour = sub.get('delivery_hour', 6) # Default to 6 AM as in dispatch.py
-
-    return templates.TemplateResponse("dashboard.html", {
-        "request": request,
-        "token": token,
-        "username": user.get('username'),
-        "user_tz": user_tz, # Pass it to template
-        "delivery_hour": delivery_hour, # Pass it to template
-        "book_title": book.get('title', 'Unknown'),
-        "book_author": book.get('author', 'Unknown'),
-        "current": current,
-        "total": total,
-        "percent": percent,
-        "start_date": start_str,
-        "status": sub.get('status', 'active'),
-        # NEW FIELDS
-        "current_edition": current_edition,
-        "edition_label": edition_label,
-        # ADDING THIS
-        "queued_books": queued_books_data
-    })
-
-# --- NEW: VACATION MODE TOGGLE ---
-@app.post("/toggle_pause", response_class=HTMLResponse)
-async def toggle_pause(request: Request, token: str = Form(...), db: MongoClient = Depends(get_db)):
-    sub_id_str = verify_binge_token(token)
-    if not sub_id_str: return HTMLResponse("Invalid Token", status_code=400)
-
-    sub = db.subscriptions.find_one({"_id": ObjectId(sub_id_str)})
-
-    # Toggle Logic
-    new_status = 'paused' if sub['status'] == 'active' else 'active'
-
-    db.subscriptions.update_one(
-        {"_id": sub['_id']},
-        {"$set": {"status": new_status}}
-    )
-
-    # Redirect back to profile to see change
-    # We use a simple meta refresh or JS redirect to keep the token in URL
-    # Or just re-render the profile function (cleaner is redirect, but needs token in URL)
-
-    # For simplicity, we redirect back to the GET route with the token
-    return RedirectResponse(url=f"/profile?token={token}", status_code=303)
-
-@app.post("/update_preferences", response_class=HTMLResponse)
-async def update_preferences(
-    request: Request, 
-    token: str = Form(...), 
-    timezone: str = Form(...), 
-    delivery_hour: int = Form(...), 
-    db: MongoClient = Depends(get_db)
-):
-    sub_id_str = verify_binge_token(token)
-    if not sub_id_str: return HTMLResponse("Invalid Token", status_code=400)
-    
-    sub = db.subscriptions.find_one({"_id": ObjectId(sub_id_str)})
-    if not sub: return HTMLResponse("Subscription not found", status_code=404)
-    
-    # 1. Update User Timezone
-    db.users.update_one(
-        {"_id": sub['user_id']},
-        {"$set": {"timezone": timezone}}
-    )
-    
-    # 2. Update Subscription Delivery Hour
-    db.subscriptions.update_one(
-        {"_id": sub['_id']},
-        {"$set": {"delivery_hour": delivery_hour}}
-    )
-    
-    return RedirectResponse(url=f"/profile?token={token}", status_code=303)
-
-# --- SUGGESTION ROUTES ---
+# --- SUGGESTIONS ---
 
 @app.get("/suggest", response_class=HTMLResponse)
 async def suggest_page(request: Request):
     return templates.TemplateResponse("suggest.html", {"request": request})
 
+
 @app.post("/suggest", response_class=HTMLResponse)
 async def handle_suggestion(
-    request: Request,
     title: str = Form(...),
     author: str = Form(...),
     link: str = Form(None),
     comments: str = Form(None),
-    db: MongoClient = Depends(get_db)
+    conn=Depends(get_db),
 ):
-
-    # Save to new 'suggestions' collection
-    suggestion = {
-        "title": title,
-        "author": author,
-        "link": link,
-        "comments": comments,
-        "submitted_at": datetime.now(),
-        "status": "pending" # pending, approved, rejected
-    }
-
-    db.suggestions.insert_one(suggestion)
-
-    # Success Page
-    html_content = f"""
-    <html>
-    <body style="font-family: sans-serif; text-align: center; padding-top: 50px;">
-        <h1 style="color: green;">Thank You!</h1>
-        <p>We have received your suggestion for <strong>{title}</strong>.</p>
-        <p>If we add it to the library, it will appear on the homepage soon.</p>
-        <br>
-        <a href="/">Return Home</a>
-    </body>
-    </html>
-    """
-    return HTMLResponse(content=html_content)
-
-@app.post("/change_edition", response_class=HTMLResponse)
-async def change_edition(request: Request, token: str = Form(...), target_edition: str = Form(...), db: MongoClient = Depends(get_db)):
-    sub_id_str = verify_binge_token(token)
-    if not sub_id_str: return HTMLResponse("Invalid Token", status_code=400)
-    
-    sub = db.subscriptions.find_one({"_id": ObjectId(sub_id_str)})
-    current_book_id = sub['book_id']
-    
-    # 1. Determine Base ID
-    # Remove existing suffixes to get the "clean" ID (e.g. pg16_short -> pg16)
-    base_id = current_book_id.replace("_short", "").replace("_long", "")
-    
-    # 2. Construct New ID
-    new_book_id = base_id
-    if target_edition == "short":
-        new_book_id = f"{base_id}_short"
-    elif target_edition == "long":
-        new_book_id = f"{base_id}_long"
-        
-    # 3. Validation: Does the new book exist?
-    new_book = db.books.find_one({"book_id": new_book_id})
-    if not new_book:
-        return HTMLResponse("<h1>Error: That edition is not available for this book.</h1>", status_code=404)
-        
-    # 4. Update Subscription (RESET PROGRESS)
-    db.subscriptions.update_one(
-        {"_id": sub['_id']},
-        {
-            "$set": {
-                "book_id": new_book_id,
-                "current_sequence": 1, # <--- RESET
-                "status": "active",
-                "last_sent": None     # Allow immediate send
-            }
-        }
+    conn.execute(
+        """INSERT INTO suggestions (title, author, link, comments, status, submitted_at)
+           VALUES (?, ?, ?, ?, 'pending', ?)""",
+        (title, author, link, comments, utc_now()),
     )
-    
-    return RedirectResponse(url=f"/profile?token={token}", status_code=303)
+    return simple_page(
+        "Thank You!",
+        f"<p>We have received your suggestion for <strong>{title}</strong>.</p>"
+        f"<p>If we add it to the library, it will appear on the homepage soon.</p>",
+        colour="green",
+    )
 
-# --- LOGIN ROUTES ---
 
-@app.get("/login", response_class=HTMLResponse)
-async def login_page(request: Request):
-    return templates.TemplateResponse("login.html", {"request": request})
+# --- ADMIN (a role on the user row, plus a fresh token) ---
 
-@app.post("/login", response_class=HTMLResponse)
-async def handle_login(
-    request: Request,
-    username: str = Form(...),
-    password: str = Form(...),
-    db: MongoClient = Depends(get_db)
-):
-    manager = UserManager(db)
-    
-    # 1. Verify Credentials
-    # Returns user_id if valid, None if invalid
-    user_id = manager.verify_user(username, password)
-    
+@app.get("/admin", response_class=HTMLResponse)
+async def admin_dashboard(request: Request, token: str = "", conn=Depends(get_db)):
+    user_id = security.verify_admin_token(token) if token else None
     if not user_id:
-        return templates.TemplateResponse("login.html", {
-            "request": request,
-            "error": "Invalid username or password."
+        return invalid_link("This admin link is missing or has expired. "
+                            "Mint a new one with: python tools/admin.py link &lt;email&gt;")
+
+    manager = UserManager(conn)
+    if not manager.is_admin(int(user_id)):
+        return HTMLResponse("<h1>Not an admin account</h1>", status_code=403)
+
+    rows = conn.execute(
+        """SELECT s.id, s.user_id, s.status, s.current_sequence, s.chunks_per_day,
+                  s.last_sent, u.timezone, b.title AS book_title, b.total_chunks
+           FROM subscriptions s
+           JOIN users u ON u.id = s.user_id
+           LEFT JOIN books b ON b.id = s.book_id
+           ORDER BY s.created_at DESC"""
+    ).fetchall()
+
+    user_data = []
+    for row in rows:
+        total = row["total_chunks"] or 1
+        last_sent = dispatch.parse_ts(row["last_sent"])
+        user_data.append({
+            "email": manager.email_for(row["user_id"]) or "[could not decrypt]",
+            "timezone": row["timezone"],
+            "book_title": row["book_title"] or "(missing book)",
+            "current": row["current_sequence"],
+            "total": total,
+            "percent": min(int((row["current_sequence"] / total) * 100), 100),
+            "status": row["status"],
+            "last_sent": last_sent.strftime("%Y-%m-%d %H:%M") if last_sent else "Never",
         })
-        
-    # 2. Find Subscription (to generate the token)
-    # We use the token as our "Session Cookie" for now
-    sub = db.subscriptions.find_one({"user_id": user_id})
-    
-    if not sub:
-        return HTMLResponse("<h1>Error: No active subscription found for this user.</h1>", status_code=404)
-        
-    # 3. Generate Magic Link
-    token = security.generate_binge_token(sub['_id'])
-    
-    # 4. Redirect to Dashboard
-    return RedirectResponse(url=f"/profile?token={token}", status_code=303)
 
-@app.get("/library", response_class=HTMLResponse)
-async def library(request: Request, db: MongoClient = Depends(get_db)):
-    # 1. Fetch Books (Standard Edition)
-    books_cursor = db.books.find(
-        {"chunk_size": 750}, 
-        {"book_id": 1, "title": 1, "author": 1, "total_chunks": 1, "description": 1, "_id": 0}
-    ).sort("title", 1)
-    
-    books = []
-    for b in books_cursor:
-        # 2. Logic to generate Gutenberg Cover URL
-        # Format: pg123 -> 123
-        clean_id = b['book_id'].replace("pg", "")
-        if clean_id.isdigit():
-            b['cover_url'] = f"https://www.gutenberg.org/cache/epub/{clean_id}/pg{clean_id}.cover.medium.jpg"
-        else:
-            # Fallback for weird IDs or testing
-            b['cover_url'] = "https://via.placeholder.com/150x230?text=No+Cover"
-            
-        books.append(b)
-    
-    return templates.TemplateResponse("library.html", {
-        "request": request, 
-        "books": books
-    })
-
-@app.get("/privacy", response_class=HTMLResponse)
-async def privacy(request: Request):
-    return templates.TemplateResponse("privacy.html", {"request": request})
-
-@app.get("/intro", response_class=HTMLResponse)
-async def intro_page(request: Request):
-    return templates.TemplateResponse("intro.html", {"request": request})
+    return templates.TemplateResponse("admin.html", {"request": request, "users": user_data})

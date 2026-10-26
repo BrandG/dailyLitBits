@@ -1,53 +1,79 @@
+"""Subscribe someone to a book from the command line.
+
+The website does the same thing through /signup; this is for adding a reader
+by hand and for testing a delivery end to end.
+"""
 import argparse
-import hashlib
-from pymongo import MongoClient
-from datetime import datetime
-import config
+from datetime import datetime, timezone
 
-def get_user_id(email):
-    clean_email = email.lower().strip().encode()
-    return hashlib.sha256(clean_email).hexdigest()
+import db
+import dispatch
+from user_manager import UserManager
 
-def subscribe_user(email, book_id):
-    client = MongoClient(config.MONGO_URI)
-    db = client[config.DB_NAME]
-    
-    user_id = get_user_id(email)
-    
-    # 1. Verify User
-    if not db.users.find_one({"_id": user_id}):
-        print(f"Error: User '{email}' not found. Create them first.")
-        return
 
-    # 2. Verify Book
-    if not db.books.find_one({"book_id": book_id}):
-        print(f"Error: Book '{book_id}' not found.")
-        return
+def utc_now():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-    # 3. Check Existing
-    existing = db.subscriptions.find_one({"user_id": user_id, "book_id": book_id})
-    if existing:
-        print(f"Already subscribed. Status: {existing['status']}")
-        return
 
-    # 4. Subscribe
-    sub_doc = {
-        "user_id": user_id,
-        "book_id": book_id,
-        "current_sequence": 1,
-        "status": "active",
-        "start_date": datetime.utcnow(),
-        "last_sent": None
-    }
-    
-    db.subscriptions.insert_one(sub_doc)
-    print(f"Success! '{email}' subscribed to '{book_id}'.")
+def subscribe_user(email, book_id, chunks_per_day=2, delivery_hour=None, conn=None):
+    """Returns (ok, message, subscription_id)."""
+    owns_conn = conn is None
+    if owns_conn:
+        conn = db.get_db()
+
+    if delivery_hour is None:
+        delivery_hour = dispatch.TARGET_HOUR
+
+    try:
+        book = conn.execute("SELECT id, title FROM books WHERE id = ?", (book_id,)).fetchone()
+        if not book:
+            return False, f"Book '{book_id}' is not in the library.", None
+
+        manager = UserManager(conn)
+        with db.transaction(conn):
+            user_id, created = manager.get_or_create_user(email)
+
+            existing = conn.execute(
+                """SELECT id, status FROM subscriptions
+                   WHERE user_id = ? AND book_id = ?
+                     AND status IN ('active', 'queued', 'paused')""",
+                (user_id, book_id),
+            ).fetchone()
+            if existing:
+                return (False,
+                        f"Already subscribed (status: {existing['status']}).",
+                        existing["id"])
+
+            active = conn.execute(
+                "SELECT COUNT(*) FROM subscriptions WHERE user_id = ? AND status = 'active'",
+                (user_id,),
+            ).fetchone()[0]
+            status = "active" if active == 0 else "queued"
+
+            cur = conn.execute(
+                """INSERT INTO subscriptions
+                       (user_id, book_id, status, current_sequence, chunks_per_day,
+                        delivery_hour, last_sent, created_at)
+                   VALUES (?, ?, ?, 1, ?, ?, NULL, ?)""",
+                (user_id, book_id, status, chunks_per_day, delivery_hour, utc_now()),
+            )
+            sub_id = cur.lastrowid
+
+        who = "new reader" if created else "existing reader"
+        return True, f"Subscribed ({who}) to '{book['title']}' as {status}.", sub_id
+    finally:
+        if owns_conn:
+            conn.close()
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Subscribe a user to a book")
-    parser.add_argument("email", help="User email")
-    parser.add_argument("book_id", help="Book ID (e.g., pg84)")
-    
+    parser = argparse.ArgumentParser(description="Subscribe a reader to a book")
+    parser.add_argument("email")
+    parser.add_argument("book_id", help="Book id, e.g. pg84")
+    parser.add_argument("--chunks-per-day", type=int, default=2)
+    parser.add_argument("--delivery-hour", type=int)
     args = parser.parse_args()
-    
-    subscribe_user(args.email, args.book_id)
+
+    ok, message, sub_id = subscribe_user(
+        args.email, args.book_id, args.chunks_per_day, args.delivery_hour)
+    print(("OK: " if ok else "FAILED: ") + message + (f" (id {sub_id})" if sub_id else ""))

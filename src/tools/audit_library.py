@@ -1,3 +1,7 @@
+"""NOT PORTED: this script still reads MongoDB, which the app no longer
+uses. It will find an empty database. Kept for reference until it is
+either rewritten against db.py or deleted - see CLAUDE.md.
+"""
 from logger import log
 import os
 import sys

@@ -64,30 +64,93 @@ docker exec -it dailylitbits pytest tests/ -v
   - All routes that need database access use the `get_db` dependency
 
 ### Database Architecture
-- **MongoDB Collections**:
-  - `books`: Book metadata (title, author, total_chunks, edition, parent_id)
-  - `chunks`: Individual text chunks (book_id, sequence, content, word_count)
-  - `users`: User accounts with encrypted emails (email_enc, username, password_hash, is_claimed)
-  - `subscriptions`: Active/queued/completed/paused reading assignments (user_id, book_id, current_sequence, status)
-  - `suggestions`: User-submitted book suggestions
 
-### Multi-Edition System
-Books are stored in three editions, each as a separate book entry:
-- **Standard**: `pg<ID>` (750 words per chunk)
-- **Short**: `pg<ID>_short` (325 words per chunk)
-- **Long**: `pg<ID>_long` (1500 words per chunk)
+**SQLite**, one file: `data/app.db` on the host, `/data/app.db` in the
+container (`../data:/data` in docker-compose, and `data/` is git-ignored).
+Moved off the shared BlueHorseshoe MongoDB on 2026-10-25 - see the Incident
+Log for why that coupling had to go. Nothing the website or cron runs touches
+MongoDB any more.
 
-All editions of the same book share a `parent_id` field (the base ID without suffix). This enables tracking which books a user has read across editions.
+- Schema: `src/schema.sql`, applied by `db.init_db()` and written to be
+  idempotent. Tables: `users`, `books`, `chunks`, `subscriptions`,
+  `suggestions`.
+- Connections: `db.connect()` for a plain one, `db.get_db()` to also ensure
+  the schema, `db.transaction(conn)` around a batch of writes. WAL mode,
+  foreign keys on, 15s busy timeout.
+- `db.connect()` passes `check_same_thread=False`, because FastAPI opens the
+  connection on a worker thread and uses it on the event loop thread. That is
+  safe only because a connection belongs to one request and is used serially
+  within it. Do not share a connection across concurrent work.
+- Several queries alias columns to the names the templates already use
+  (`id AS book_id`, `blurb AS description`) rather than rename in templates.
+
+Still on MongoDB and **not ported**: `src/tools/audit_library.py` and
+`src/tools/enhance_library.py`. They carry a NOT PORTED banner and will find
+an empty database. Rewrite against `db.py` or delete them.
+
+### Chunk Size and Delivery Size
+
+**Replaces the three-edition system** (Mongo-era: `pg11`, `pg11_short`,
+`pg11_long` at 750/325/1500 words, linked by `parent_id`). That stored every
+book three times, tripled recap generation, and lost the reader's place on an
+edition switch because the sequence numbers did not line up.
+
+In SQLite each book is chunked **once**, at `ingest.CHUNK_TARGET_WORDS` (325).
+How much arrives per delivery is `subscriptions.chunks_per_day` (default 2,
+roughly the old 750-word standard). Changing it does not move the reader's
+place - it only changes how many chunks the next email carries.
+
+Chunk boundaries fall between paragraphs, and `split_long_paragraph()` breaks
+on sentence endings when a single paragraph is itself longer than the target.
+Without that, Gutenberg's unbroken letters and contents blocks produced
+2,480-word chunks in a 325-word scheme. Measured spread after the fix, over
+three real books: 139-473 words, averaging 281.
 
 ### Security & Authentication
-- **Email Encryption**: User emails are encrypted at rest using Fernet symmetric encryption
-- **Token-based Auth**: Uses `itsdangerous.URLSafeSerializer` for magic links
-  - `binge_token`: Used for dashboard access and "read next" functionality
-  - `unsub_token`: Used for unsubscribe links
-- **Password Hashing**: Uses Argon2 via passlib for claimed accounts
-- **Account States**:
-  - "Ghost" users: Email only, created at signup
-  - "Claimed" users: Have username and password for login
+
+**One kind of user.** A reader is an email address. There is no username, no
+password, no "claimed" state, and no separate admin login. Identity is a
+signed link mailed to that address; `users.role` ('reader' or 'admin') is the
+only permission.
+
+- **Addresses** are Fernet-encrypted at rest (`users.email_enc`). Because
+  Fernet output is non-deterministic the ciphertext cannot be searched, so
+  `users.email_lookup` holds an HMAC of the normalised address - an indexed,
+  unique lookup that keeps the address out of the clear. Never log a
+  decrypted address; the old version printed them to stdout on every signup,
+  which put them in `docker logs` and undid the encryption.
+- **Tokens** (`src/security.py`), each with its own salt so one cannot be
+  replayed as another:
+
+  | Purpose | Carries | Lifetime |
+  |---|---|---|
+  | `dashboard` | user id | long - it lives in an inbox |
+  | `unsubscribe` | subscription id | long |
+  | `next` | subscription id | long |
+  | `admin` | user id | 1 hour (`ADMIN_TOKEN_MAX_AGE`) |
+
+- Signed with `SECRET_KEY`, deliberately **not** `ENCRYPTION_KEY`. One key for
+  both would mean rotating it invalidated every link *and* made every stored
+  address undecryptable at once.
+- **Authorisation, not just authentication.** A dashboard token says who you
+  are; any route acting on a subscription also checks that the subscription
+  belongs to that user (`owned_subscription()`). A valid token for user A
+  cannot touch user B's subscription.
+- **Getting back in**: `/login` takes an email and mails the dashboard link.
+  It answers identically for known and unknown addresses, so it cannot be
+  used to test whether someone is subscribed.
+- **Admin**: `/admin` needs a fresh admin token *and* `role = 'admin'`.
+
+```bash
+# Make someone an admin (--create if they have never signed up)
+docker exec dailylitbits python tools/admin.py promote you@example.com --create
+
+# Mint a login link, valid one hour
+docker exec dailylitbits python tools/admin.py link you@example.com
+
+docker exec dailylitbits python tools/admin.py list
+docker exec dailylitbits python tools/admin.py demote someone@example.com
+```
 
 ### Email Dispatch System (`src/dispatch.py`)
 
@@ -127,9 +190,11 @@ Primary script for adding new books to the system. Process:
 2. Extracts title and author from Gutenberg metadata
 3. Cleans text (removes Gutenberg headers/footers)
 4. Downloads cover image from Gutenberg
-5. Generates AI blurb/description
-6. Chunks text into three editions (standard/short/long)
-7. Inserts chunks and book metadata into MongoDB
+5. Generates AI blurb/description (skip with `--no-ai`)
+6. Chunks text once at 325 words (`CHUNK_TARGET_WORDS`)
+7. Inserts book and chunks into SQLite, replacing any earlier copy of that
+   book (`ON DELETE CASCADE` clears its chunks), so re-ingesting is safe
+8. Recaps are **not** generated unless asked for - see below
 
 ```bash
 # Ingest single book by Gutenberg ID
@@ -143,7 +208,35 @@ docker exec -it dailylitbits python ingest.py book_list.txt
 
 # Override metadata
 docker exec -it dailylitbits python ingest.py pg11 --title "Custom Title" --author "Author Name"
+
+# Text only, no API calls at all
+docker exec -it dailylitbits python ingest.py pg11 --no-ai
+
+# Ingest and generate recaps in one pass
+docker exec -it dailylitbits python ingest.py pg11 --recaps
+
+# Backfill recaps for a book already stored; no download, no re-chunking
+docker exec -it dailylitbits python ingest.py pg11 --recaps-only
+
+# Measure before committing to a big run: stop after N chunks
+docker exec -it dailylitbits python ingest.py pg11 --recaps-only --limit 40
 ```
+
+#### Recaps are opt-in on purpose
+
+`chunks.recap` holds a running "story so far" through that chunk, so a
+delivery starting at chunk S reads chunk S-1's recap whatever
+`chunks_per_day` is. That flexibility is why **every** chunk needs a recap,
+and the chain means the calls are sequential within a book (though different
+books are independent and can run in parallel).
+
+`generate_recaps_for_book()` resumes after the last chunk that already has a
+recap and stops at the first failure rather than leaving a hole in the chain.
+
+Measured 2026-10-25 on `gemini-3.5-flash-lite`, 41 chained calls on pg11:
+0.94s per call, 465 input and 51 output tokens per call. For the 100 books in
+`book_list.txt` that projects to roughly 28,000 calls, about 7 hours
+sequential and single-digit dollars.
 
 ## Important Patterns & Conventions
 
@@ -152,10 +245,11 @@ Always use the dependency injection pattern for database access:
 
 ```python
 @app.get("/route")
-async def route_handler(db: MongoClient = Depends(get_db)):
-    # Use db here
-    books = list(db.books.find(...))
+async def route_handler(conn=Depends(get_db)):
+    books = conn.execute("SELECT id AS book_id, title FROM books ORDER BY title").fetchall()
 ```
+
+The dependency hands out one connection per request and closes it afterwards.
 
 ### Subscription Status Flow
 - `active`: Currently receiving daily parts
@@ -167,12 +261,22 @@ async def route_handler(db: MongoClient = Depends(get_db)):
 Only ONE subscription per user can be `active` at a time. Others must be `queued`.
 
 ### Token Generation Pattern
-All magic links use subscription_id as the payload:
+The payload depends on what the link is for: the dashboard identifies a
+*user*, the links inside an email identify a *subscription*. Mint with the
+matching function - the salts mean a token is useless for any other purpose
+(see Security & Authentication).
 
 ```python
-token = security.generate_binge_token(subscription_id)
-dashboard_link = f"https://dailylitbits.com/profile?token={token}"
+# A way back in to everything this reader has
+dashboard_link = f"https://dailylitbits.com/profile?token={security.generate_dashboard_token(user_id)}"
+
+# Links that belong to one subscription, for inside its email
+next_link  = f"https://dailylitbits.com/next?token={security.generate_next_token(sub_id)}"
+unsub_link = f"https://dailylitbits.com/unsubscribe?token={security.generate_unsub_token(sub_id)}"
 ```
+
+Any route that acts on a subscription must also check it belongs to the
+token's user - `owned_subscription(conn, sub_id, user_id)` in `main.py`.
 
 ### Timezone Handling
 - User timezone stored in `users.timezone` (defaults to 'UTC')
@@ -183,10 +287,21 @@ dashboard_link = f"https://dailylitbits.com/profile?token={token}"
 ## Configuration & Environment
 
 The `.env` file (not committed to git) contains:
-- `MONGO_URI`: MongoDB connection string
-- `DB_NAME`: Database name
+- `MONGO_URI`: MongoDB connection string. Must carry the `dlbapp` credentials and
+  `authSource=slow_reader_db` - the shared mongod requires authentication (see Incident Log).
+  Keep this file at mode 600.
+- `DB_NAME`: MongoDB database name. Only the two unported `tools/` scripts read it.
+- `DB_PATH`: SQLite file. Defaults to `<project>/data/app.db`, which resolves
+  correctly both on the host and in the container - leave it unset.
 - `ENCRYPTION_KEY`: Fernet key for email encryption (must be 32 bytes, base64-encoded)
+- `SECRET_KEY`: signs every magic link and keys the `email_lookup` HMAC.
+  Changing it logs everyone out **and** orphans every `email_lookup` value, so
+  it is not a routine rotation. Separate from `ENCRYPTION_KEY` on purpose.
 - `GEMINI_API_KEY`: Google Gemini API key
+- `GEMINI_MODEL`: Gemini model id (default `gemini-3.5-flash-lite`). Google
+  retires these; `gemini-2.0-flash` was withdrawn and every AI feature
+  returned 404 until this was changed. List what the key can see with
+  `docker exec dailylitbits python tools/model_list.py`.
 - `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`: Brevo SMTP credentials
 - `FROM_EMAIL`: Sender email address
 
@@ -198,38 +313,81 @@ The application uses system cron (not Docker-based) for scheduled tasks:
 # Hourly email dispatch
 0 * * * * docker exec dailylitbits python dispatch.py
 
-# Daily AI processing (at 8 PM)
+# Daily recap report (at 8 PM). summarize.py REPORTS by default and generates
+# nothing without --run, so this entry logs what is outstanding rather than
+# spending the Gemini budget unattended. Do not add --run to the crontab.
 0 20 * * * docker exec dailylitbits python summarize.py
 
-# Daily database backup (at 2 AM)
+# Daily database backup (at 2 AM). Runs on the host, against the SQLite file
+# through the bind mount - one of the few things that is NOT run via docker exec.
 0 2 * * * /usr/bin/python3 /root/dailyLitBits/src/backup.py
 ```
+
+## Backup and Restore
+
+`src/backup.py` uses SQLite's online backup API (safe while the app is
+serving), then **opens the copy and runs `PRAGMA integrity_check` before
+calling it a success**, logging the book/chunk/user counts it found. An
+archive under that bar is a failure, and a failed run does not clean up older
+backups. Kept in `~/backups` for `RETENTION_DAYS` (3), gzipped.
+
+That verification exists because the Mongo-era version wrote 23-byte files
+containing an authentication error every night for seven months while
+reporting success.
+
+To restore (there is no `sqlite3` CLI on this host, so use python):
+
+```bash
+gunzip -c ~/backups/dailylitbits_YYYY-MM-DD_HH-MM-SS.db.gz > /tmp/restored.db
+/usr/bin/python3 -c "import sqlite3; c=sqlite3.connect('/tmp/restored.db'); \
+  print(c.execute('PRAGMA integrity_check').fetchone()[0]); \
+  print(c.execute('SELECT COUNT(*) FROM chunks').fetchone()[0], 'chunks')"
+# then, with the app stopped:
+docker compose -f docker/docker-compose.yml stop web
+cp /tmp/restored.db data/app.db && rm -f data/app.db-wal data/app.db-shm
+docker compose -f docker/docker-compose.yml start web
+```
+
+Verified end to end on 2026-10-25: backed up, restored, integrity ok, content
+intact. Re-check it occasionally - that is the whole point.
 
 ## Useful Utility Scripts
 
 Located in `src/tools/`:
-- `audit_library.py`: Check library integrity, find orphaned chunks
-- `enhance_library.py`: Regenerate AI descriptions for existing books
-- `model_list.py`: List available Gemini models
+- `admin.py`: promote / demote an admin, mint a one-hour `/admin` link, list users
+- `model_list.py`: List available Gemini models - run this first when an AI
+  feature starts returning 404
 - `send_file_email.py`: Test email delivery
+- `audit_library.py`, `enhance_library.py`: **NOT PORTED.** Still MongoDB; they
+  will find an empty database. Rewrite against `db.py` or delete.
 
 ## Common Development Workflows
 
 ### Adding a New Book
 1. Find the Project Gutenberg ID (e.g., "11" for Alice in Wonderland)
 2. Run ingestion: `docker exec -it dailylitbits python ingest.py pg11`
-3. Verify in database or visit `/library` page
+   (add `--no-ai` to skip the blurb call; recaps never run unless asked)
+3. Visit `/library` to check it appears
+4. Recaps, when you want them: `ingest.py pg11 --recaps-only`. Check the
+   outstanding total across the library first with `summarize.py`.
 
 ### Testing Email Dispatch
 1. Find a subscription ID from the admin dashboard or database
-2. Force send: `docker exec -it dailylitbits python dispatch.py force <sub_id>`
-3. Check logs for errors
+2. Build the email without sending it:
+   `docker exec -it dailylitbits python dispatch.py force <sub_id> --dry-run`
+3. Send it for real: `docker exec -it dailylitbits python dispatch.py force <sub_id>`
+4. `dispatch.py` with no arguments is the hourly cron pass; it reports why each
+   subscription was skipped, which is usually "not delivery time".
 
 ### Debugging Failed Tests
-Tests use a temporary database (`test_db_<random>`). If tests fail:
-1. Check that MongoDB is accessible from container
-2. Ensure `.env` has valid credentials
-3. Look for test database cleanup issues (old test DBs lingering)
+Each test run gets its own SQLite file in a temp directory - `conftest.py`
+sets `DB_PATH` before the app modules are imported, so tests never touch
+`data/app.db` and need no database permissions. Email is never sent: the
+`sent` fixture replaces `dispatch.send_via_brevo` with a recorder, and tests
+assert against what would have gone out.
+
+If tests fail, check that `.env` has `ENCRYPTION_KEY` and `SECRET_KEY` - both
+are read at import time and will fail the whole run if missing.
 
 ### Modifying Code
 1. Edit code in `src/` directory (changes are live-mounted to container)
@@ -238,11 +396,86 @@ Tests use a temporary database (`test_db_<random>`). If tests fail:
 
 ## Important Constraints
 
-1. **Never run Python commands on the host** - always use `docker exec`
+1. **Never run Python commands on the host** - always use `docker exec`. The
+   one deliberate exception is `backup.py`, which cron runs on the host so the
+   backup lands outside the container.
 2. **Rebuild after dependency changes** - `docker compose build` after modifying `docker/requirements.txt`
 3. **Restart after code changes** - Web server must be restarted to pick up Python changes
 4. **Don't commit secrets** - `.env` file and `src/static/covers/` are git-ignored
-5. **Email encryption is required** - All user emails must be encrypted before storage
-6. **One active subscription per user** - Enforced in signup logic
+5. **Email encryption is required** - All user emails must be encrypted before
+   storage, and never written to a log
+6. **One active subscription per user** - Enforced in signup logic; the rest queue
+7. **Changing `chunks_per_day` must never reset progress** - that was the bug in
+   the old edition switcher, and there is a test for it
 7. **Timezone-aware timestamps** - Use `pytz` for all timezone operations
 8. **Rate limiting on binge reads** - 5-minute cooldown between manual dispatches
+9. **The database is not ours** - MongoDB is the container owned by the BlueHorseshoe
+   stack and shared over the external `docker_app_net` network. It requires
+   authentication, and a configuration change made over there can break this app
+   without anything here changing (see Incident Log).
+
+## Incident Log
+
+### 2026-04-03 to 2026-10-25 - HTTP 500 on every request (shared Mongo began requiring auth)
+
+**Symptom.** Every request to dailylitbits.com returned 500 for roughly seven months.
+`docker logs dailylitbits` ended in
+`pymongo.errors.OperationFailure: Command find requires authentication` (code 13).
+nginx was healthy and `curl http://127.0.0.1:8002/` reproduced the 500 directly, so the
+fault was in the app. The container itself was up and had never crashed, which is why
+nothing looked wrong from `docker ps`.
+
+**Root cause.** This project does not run its own database. It shares the MongoDB
+container owned by the BlueHorseshoe stack
+(`/root/BlueHorseshoe/docker/docker-compose.yml`, joined through the external
+`docker_app_net` network). On 2026-04-03 BlueHorseshoe enabled authentication on that
+mongod: `--auth` was added to the mongod command and a `bhapp` user was created with
+readWrite on the `bluehorseshoe` database (recorded in BlueHorseshoe's `TODO.md`).
+dailyLitBits' `MONGO_URI` was still the anonymous `mongodb://mongo:27017/`, so from the
+moment that container was recreated every query was refused. First failure in the
+container log: 2026-04-03 04:35 UTC. Nothing in this project changed - the outage came
+from a config change in a different project that happens to own the database.
+
+**Fix.** A dedicated `dlbapp` user with `readWrite` on `slow_reader_db` only, and the
+credentialled URI in `.env` (mode 600, git-ignored):
+`MONGO_URI=mongodb://dlbapp:<password>@mongo:27017/slow_reader_db?authSource=slow_reader_db`.
+
+That mongod has no user administrator - `bhapp` holds only readWrite on its own
+database, and MongoDB's localhost exception closes as soon as any user exists - so the
+new user had to be created with authentication off. If another user is ever needed:
+
+```bash
+docker stop mongo
+docker run --rm -d --name mongo-noauth -v docker_mongo_data:/data/db mongo:7 \
+  mongod --bind_ip 127.0.0.1 --wiredTigerCacheSizeGB 1
+docker exec -it mongo-noauth mongosh slow_reader_db   # db.createUser({...})
+docker stop mongo-noauth && docker start mongo
+```
+
+Creating a proper user-administrator account on that mongod would remove the need for
+this dance; that is BlueHorseshoe's call, since it owns the database.
+
+**Same root cause, also broken.** `src/backup.py` ran `mongodump --db slow_reader_db`
+with no credentials, so since 2026-04-03 every nightly backup was a 23-byte file
+containing nothing but the Unauthorized error. It now passes the `.env` `MONGO_URI`
+through `--uri`, and treats an archive under 1 KB as a failure: a dump that cannot read
+the database still exits 0 and writes a header-only archive of about 116 bytes, which is
+exactly how seven months of empty backups went unnoticed.
+
+**Still outstanding - the database is empty.** `slow_reader_db` does not exist on that
+mongod: no `books`, `chunks`, `users` or `subscriptions`. This is older than the auth
+break and has a different cause. The oldest backup still kept, from 2026-03-30, is
+already a 116-byte empty archive, so the data was gone days before authentication was
+turned on. Nothing is recoverable from this box: every archive in `/root/backups` is
+empty, and the mongod log covering that period went with the container that was replaced
+on 2026-04-03. The site now serves correctly but with an empty "Choose a Book" list.
+The public-domain library can be rebuilt with `ingest.py` (see "Adding a New Book" and
+`src/book_list.txt`); subscriber accounts and reading positions cannot.
+
+**Resolved 2026-10-25.** The app now owns its data in SQLite and no longer
+connects to that mongod at all, so a configuration change in BlueHorseshoe
+cannot take this site down again. The scoped `dlbapp` Mongo user was left in
+place: removing it needs another auth-off window on the shared database, and
+it is a read/write grant on a database that no longer exists.
+
+

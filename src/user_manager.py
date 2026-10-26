@@ -1,115 +1,110 @@
-import pytz
-from datetime import datetime
+"""Users. One kind of user, one way in.
+
+A reader is an email address. There is no username, no password and no
+"claimed" state: identity is proved by a signed link mailed to that address
+(see security.py). Whether someone is an admin is the `role` column on the
+same row - a permission, not a second mechanism.
+
+Addresses are Fernet-encrypted at rest. Fernet output is non-deterministic, so
+the ciphertext cannot be searched; `email_lookup` holds an HMAC of the
+normalised address instead, which gives an indexed unique lookup without
+keeping the address in the clear. The old version scanned and decrypted every
+row for each signup, and printed the plaintext while doing it - nothing here
+logs an address.
+"""
+import hashlib
+import hmac
+from datetime import datetime, timezone
+
 from cryptography.fernet import Fernet
-from passlib.context import CryptContext
+
 import config
 
-# Setup Password Hashing (Bcrypt)
-pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")
+
+def utc_now():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def normalise(email):
+    return email.strip().lower()
+
 
 class UserManager:
-    def __init__(self, db):
-        self.db = db
+    def __init__(self, conn):
+        self.conn = conn
         self.cipher = Fernet(config.ENCRYPTION_KEY)
 
+    # --- addresses ---
+
     def encrypt_email(self, email):
-        return self.cipher.encrypt(email.strip().lower().encode())
+        return self.cipher.encrypt(normalise(email).encode())
+
+    def decrypt_email(self, email_enc):
+        return self.cipher.decrypt(email_enc).decode()
+
+    def email_lookup(self, email):
+        """The searchable half of the pair: a keyed hash, not a reversible one."""
+        return hmac.new(
+            config.SECRET_KEY.encode(), normalise(email).encode(), hashlib.sha256
+        ).hexdigest()
+
+    # --- lookups ---
 
     def get_user_by_email(self, email):
-        """
-        Finds a user by decrypting emails. Returns user document or None.
-        """
-        target = email.lower().strip()
-        print(f"[DEBUG] Searching for email: '{target}'")
-        for user in self.db.users.find({}):
-            try:
-                decrypted_email = self.cipher.decrypt(user['email_enc']).decode()
-                # print(f"[DEBUG] Found user {user['_id']} with email: '{decrypted_email}'")
-                if decrypted_email == target:
-                    print(f"[DEBUG] Match found! ID: {user['_id']}")
-                    return user
-            except Exception as e:
-                print(f"[DEBUG] Decryption failed for user {user.get('_id')}: {e}")
-                continue # Skip bad/corrupt data
-        print("[DEBUG] No match found.")
-        return None
+        return self.conn.execute(
+            "SELECT * FROM users WHERE email_lookup = ?", (self.email_lookup(email),)
+        ).fetchone()
 
-    def create_user(self, email, timezone="UTC"):
-        """
-        Creates a 'Ghost' user (no password, no username yet).
-        """
-        # Check for existing using the new helper
-        if self.get_user_by_email(email):
-            print(f"[DEBUG] UserManager.create_user: Duplicate email found for {email}. Raising ValueError.")
-            raise ValueError("Email already registered.")
+    def get_user(self, user_id):
+        return self.conn.execute(
+            "SELECT * FROM users WHERE id = ?", (user_id,)
+        ).fetchone()
 
-        encrypted_email = self.encrypt_email(email)
-        
-        user = {
-            "email_enc": encrypted_email,
-            "timezone": timezone,
-            "created_at": datetime.now(),
-            "username": None,      # <--- NEW
-            "password_hash": None, # <--- NEW
-            "is_claimed": False,   # <--- NEW
-            "role": "reader"
-        }
-        
-        result = self.db.users.insert_one(user)
-        print(f"[DEBUG] UserManager.create_user: User inserted with _id: {result.inserted_id}")
-        return result.inserted_id
-
-    # --- NEW AUTHENTICATION METHODS ---
-
-    def claim_account(self, user_id, username, password):
-        """
-        Upgrades a Ghost user to a Claimed user.
-        """
-        # 1. Hash the password
-        hashed_pw = pwd_context.hash(password)
-
-        # 2. Update DB
+    def email_for(self, user_id):
+        """Decrypted address, or None if the row or the key is wrong."""
+        row = self.get_user(user_id)
+        if not row:
+            return None
         try:
-            # First, check if username is taken manually (clearer debugging)
-            existing = self.db.users.find_one({"username": username})
-            if existing and existing['_id'] != user_id:
-                print(f"[ERROR] Username '{username}' is already taken by {existing['_id']}")
-                return False, "Username already taken."
-
-            result = self.db.users.update_one(
-                {"_id": user_id},
-                {
-                    "$set": {
-                        "username": username,
-                        "password_hash": hashed_pw,
-                        "is_claimed": True
-                    }
-                }
-            )
-            print(f"[DEBUG] Update Result: Matched={result.matched_count}, Modified={result.modified_count}")
-
-            if result.matched_count == 0:
-                return False, "User ID not found in database."
-
-            return True, "Account claimed successfully."
-
-        except Exception as e:
-            # PRINT THE REAL ERROR
-            print(f"[CRITICAL ERROR] Claim failed: {e}")
-            return False, f"System Error: {e}"
-
-    def verify_user(self, username, password):
-        """
-        Verifies login credentials. Returns user_id if valid, None if not.
-        """
-        user = self.db.users.find_one({"username": username})
-        if not user:
+            return self.decrypt_email(row["email_enc"])
+        except Exception:
             return None
-        
-        if not user.get('password_hash'):
-            return None
-            
-        if pwd_context.verify(password, user['password_hash']):
-            return user['_id']
-        
-        return None
+
+    # --- creation ---
+
+    def get_or_create_user(self, email, timezone_name="UTC"):
+        """Returns (user_id, created). Signing up twice is not an error here."""
+        existing = self.get_user_by_email(email)
+        if existing:
+            return existing["id"], False
+
+        cur = self.conn.execute(
+            """INSERT INTO users (email_enc, email_lookup, timezone, role, created_at)
+               VALUES (?, ?, ?, 'reader', ?)""",
+            (
+                self.encrypt_email(email),
+                self.email_lookup(email),
+                timezone_name,
+                utc_now(),
+            ),
+        )
+        return cur.lastrowid, True
+
+    # --- settings and permissions ---
+
+    def set_timezone(self, user_id, timezone_name):
+        self.conn.execute(
+            "UPDATE users SET timezone = ? WHERE id = ?", (timezone_name, user_id)
+        )
+
+    def is_admin(self, user_id):
+        row = self.get_user(user_id)
+        return bool(row) and row["role"] == "admin"
+
+    def set_role(self, user_id, role):
+        if role not in ("reader", "admin"):
+            raise ValueError("role must be 'reader' or 'admin'")
+        cur = self.conn.execute(
+            "UPDATE users SET role = ? WHERE id = ?", (role, user_id)
+        )
+        return cur.rowcount > 0

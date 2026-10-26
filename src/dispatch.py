@@ -1,59 +1,60 @@
+"""Sends the daily deliveries.
+
+A delivery is subscriptions.chunks_per_day consecutive chunks, concatenated
+into one email, after which current_sequence advances by however many were
+sent. Nothing here calls Gemini: the recap comes from chunks.recap, written
+once at ingest. The old version made a live API call per email and ignored
+the cached value.
+
+Run by cron every hour; each subscription decides whether it is its own
+delivery hour in the reader's timezone.
+"""
 import argparse
-from pymongo import MongoClient
-from cryptography.fernet import Fernet
-# from sendgrid import SendGridAPIClient  <-- Removed
-# from sendgrid.helpers.mail import Mail <-- Removed
-from datetime import datetime, timedelta
-import pytz
-import config
-import security
-from bson import ObjectId
 import random
+from datetime import datetime, timedelta, timezone
+
+import pytz
+
 import ai
-
-# Global placeholders for database and cipher, to be initialized either by __main__ or passed in.
-db = None
-cipher = None
-
-def run_cron():
-    """Processes all active subscriptions for the cron job."""
-    print("Running dispatch.py in cron mode...")
-    # Find all active subscriptions
-    subscriptions = list(db.subscriptions.find({'status': 'active'}))
-    if not subscriptions:
-        print("   No active subscriptions found.")
-        return
-
-    for sub in subscriptions:
-        sub_id = str(sub['_id'])
-        success, message = process_subscription(sub_id, trigger='cron')
-        if success:
-            print(f"   Successfully dispatched for subscription {sub_id}")
-        else:
-            print(f"   Failed to dispatch for subscription {sub_id}: {message}")
-
-def run_force(sub_id):
-    """Processes a specific subscription by ID."""
-    print(f"Running dispatch.py in force mode for subscription ID: {sub_id}...")
-    success, message = process_subscription(sub_id, trigger='binge')
-    if success:
-        print(f"   Successfully dispatched for subscription {sub_id}")
-    else:
-        print(f"   Failed to dispatch for subscription {sub_id}: {message}")
+import config
+import db
+import security
+from user_manager import UserManager
 
 # --- CONFIGURATION ---
 TARGET_HOUR = 6
-BINGE_COOLDOWN_MINUTES = 5 
+NEXT_COOLDOWN_MINUTES = 5
 
-def format_email_html(title, sequence, total_chunks, content, unsub_token, binge_token, recap=None):
+
+def utc_now():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def parse_ts(value):
+    """SQLite holds timestamps as ISO-8601 UTC text. Returns an aware datetime."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else pytz.utc.localize(parsed)
+
+
+def format_email_html(title, first_seq, last_seq, total_chunks, content,
+                      unsub_token, next_token, dashboard_token, recap=None):
     html_content = content.replace('\n\n', '</p><p>').replace('\n', '<br>')
     base_url = "https://dailylitbits.com"
     unsub_link = f"{base_url}/unsubscribe?token={unsub_token}"
-    binge_link = f"{base_url}/next?token={binge_token}"
-    dashboard_link = f"{base_url}/profile?token={binge_token}"
+    binge_link = f"{base_url}/next?token={next_token}"
+    dashboard_link = f"{base_url}/profile?token={dashboard_token}"
+
+    # One chunk reads "Part 7"; several read "Parts 7-9".
+    part_label = (f"Part {first_seq}" if first_seq == last_seq
+                  else f"Parts {first_seq}-{last_seq}")
 
     if total_chunks < 1: total_chunks = 1
-    percent = int((sequence / total_chunks) * 100)
+    percent = int((last_seq / total_chunks) * 100)
     if percent < 1: percent = 1
     
     # Calculate widths for the table cells
@@ -61,7 +62,7 @@ def format_email_html(title, sequence, total_chunks, content, unsub_token, binge
     gray_width = 100 - percent
 
     recap_html = ""
-    if recap and sequence > 1:
+    if recap and first_seq > 1:
         recap_html = f"""
         <div style="background-color: #f8f9fa; border-left: 4px solid #6c757d; padding: 15px; margin-bottom: 25px; color: #555; font-style: italic; font-size: 14px;">
             <strong style="color: #333; font-style: normal; display: block; margin-bottom: 5px;">Previously:</strong>
@@ -72,9 +73,9 @@ def format_email_html(title, sequence, total_chunks, content, unsub_token, binge
     binge_button_html = f"""
     <div style="text-align: center; margin-top: 30px;">
         <a href="{binge_link}" style="background-color: #2c3e50; color: #ffffff; padding: 10px 20px; text-decoration: none; border-radius: 5px; font-size: 14px; font-weight: bold;">
-            Send Part {sequence + 1} Now
+            Send the next part now
         </a>
-        <p style="font-size: 11px; color: #999; margin-top: 5px;">(Or wait until tomorrow 6 AM)</p>
+        <p style="font-size: 11px; color: #999; margin-top: 5px;">(Or wait for tomorrow's delivery)</p>
     </div>
     """
 
@@ -96,7 +97,7 @@ def format_email_html(title, sequence, total_chunks, content, unsub_token, binge
                         </table>
                     </td>
                     <td width="15%" style="text-align: right; font-family: sans-serif; font-size: 12px; color: #999; white-space: nowrap; padding-left: 10px;">
-                        Part {sequence} of {total_chunks}
+                        {part_label} of {total_chunks}
                     </td>
                 </tr>
             </table>
@@ -123,7 +124,7 @@ def format_email_html(title, sequence, total_chunks, content, unsub_token, binge
     return template
 
 # --- UPGRADED VICTORY TEMPLATE (Table-Based for Email Compatibility) ---
-def format_victory_email(book_title, days_taken, word_count, suggestions, switch_token, additional_message=None):
+def format_victory_email(book_title, days_taken, word_count, suggestions, dashboard_token, additional_message=None):
     base_url = "https://dailylitbits.com"
 
     # Grammar fix: "1 Day" vs "2 Days"
@@ -132,7 +133,7 @@ def format_victory_email(book_title, days_taken, word_count, suggestions, switch
     # Create HTML for the 3 suggested books
     suggestions_html = ""
     for book in suggestions:
-        link = f"{base_url}/switch_book?token={switch_token}&new_book_id={book['book_id']}"
+        link = f"{base_url}/switch_book?token={dashboard_token}&new_book_id={book['id']}"
         author = book.get('author', 'Unknown Author')
 
         suggestions_html += f"""
@@ -221,299 +222,226 @@ def send_via_brevo(to_email, subject, html_body):
         print(f"   [ERROR] Unexpected error sending email: {e}")
         return False
 
-def process_subscription(sub_id, trigger="cron", debug=False, db_session=None, cipher_obj=None):
-    # Use provided db/cipher or fall back to globals (for CLI usage)
-    local_db = db_session if db_session is not None else db
-    local_cipher = cipher_obj if cipher_obj is not None else cipher
+def process_subscription(sub_id, trigger="cron", conn=None, dry_run=False):
+    """Sends the next delivery for one subscription. Returns (ok, message).
 
-    if local_db is None:
-        return False, "Database not initialized"
-    if local_cipher is None:
-        return False, "Cipher not initialized"
+    trigger "cron" honours the reader's delivery hour and the once-a-day rule;
+    "next" is the button in the email and is rate limited instead.
+    dry_run builds the email without sending it.
+    """
+    owns_conn = conn is None
+    if owns_conn:
+        conn = db.get_db()
 
-    sub = local_db.subscriptions.find_one({"_id": ObjectId(sub_id)})
-    if not sub: return False, "Subscription not found"
-    
-    # We allow 'completed' status here specifically to let them re-trigger the victory email if needed
-    if sub['status'] != 'active' and sub['status'] != 'completed': 
-        return False, "Subscription is not active"
+    try:
+        sub = conn.execute("SELECT * FROM subscriptions WHERE id = ?", (sub_id,)).fetchone()
+        if not sub:
+            return False, "Subscription not found"
+        # 'completed' is allowed so a victory email can be re-sent if needed.
+        if sub["status"] not in ("active", "completed"):
+            return False, f"Subscription is {sub['status']}, not active"
 
-    user_id = sub['user_id']
-    user = local_db.users.find_one({"_id": user_id})
-    if not user: return False, "User not found"
+        manager = UserManager(conn)
+        user = manager.get_user(sub["user_id"])
+        if not user:
+            return False, "User not found"
 
-    # Rate Limit Check (Binge Only)
-    if trigger == 'binge':
-        last_sent = sub.get('last_sent')
-        if last_sent:
-            if last_sent.tzinfo is None: last_sent = pytz.utc.localize(last_sent)
-            now_utc = datetime.now(pytz.utc)
-            diff = now_utc - last_sent
-            if diff < timedelta(minutes=BINGE_COOLDOWN_MINUTES):
-                wait_time = BINGE_COOLDOWN_MINUTES - int(diff.total_seconds() / 60)
-                return False, f"Please wait {wait_time} minutes before requesting the next chapter."
+        if trigger == "next":
+            last_sent = parse_ts(sub["last_sent"])
+            if last_sent:
+                waited = datetime.now(pytz.utc) - last_sent
+                if waited < timedelta(minutes=NEXT_COOLDOWN_MINUTES):
+                    left = NEXT_COOLDOWN_MINUTES - int(waited.total_seconds() / 60)
+                    return False, f"Please wait {left} more minutes before the next part."
 
-    # Delivery Time Check (Cron Only)
-    if trigger == 'cron':
-        user_tz_str = user.get('timezone', 'UTC')
-        try:
-            user_tz = pytz.timezone(user_tz_str)
-        except pytz.UnknownTimeZoneError:
-            user_tz = pytz.UTC
-            
-        now_user_tz = datetime.now(user_tz)
-        target_hour = sub.get('delivery_hour', TARGET_HOUR) # Default to 6
-        
-        # 1. Check Hour
-        if now_user_tz.hour != target_hour:
-             return False, f"Not delivery time yet. (Current: {now_user_tz.hour}, Target: {target_hour})"
+        if trigger == "cron":
+            try:
+                user_tz = pytz.timezone(user["timezone"] or "UTC")
+            except pytz.UnknownTimeZoneError:
+                user_tz = pytz.UTC
 
-        # 2. Check Frequency (Already sent today?)
-        last_sent = sub.get('last_sent')
-        if last_sent:
-            if last_sent.tzinfo is None:
-                last_sent = pytz.utc.localize(last_sent)
-            
-            last_sent_user_tz = last_sent.astimezone(user_tz)
-            
-            if last_sent_user_tz.date() == now_user_tz.date():
+            now_local = datetime.now(user_tz)
+            if now_local.hour != sub["delivery_hour"]:
+                return False, (f"Not delivery time (local hour {now_local.hour}, "
+                               f"target {sub['delivery_hour']})")
+
+            last_sent = parse_ts(sub["last_sent"])
+            if last_sent and last_sent.astimezone(user_tz).date() == now_local.date():
                 return False, "Already sent today."
 
-    book_id = sub['book_id']
-    seq = sub['current_sequence']
-    
-    try:
-        email = local_cipher.decrypt(user['email_enc']).decode()
-    except Exception:
-        return False, "Decryption failed"
+        email = manager.email_for(sub["user_id"])
+        if not email:
+            return False, "Could not decrypt the subscriber's address"
 
-    chunk = local_db.chunks.find_one({"book_id": book_id, "sequence": seq})
-    
-    # --- VICTORY LOGIC ---
-    if not chunk:
-        # Calculate stats
-        start_date = sub.get('created_at', datetime.now())
-        if start_date.tzinfo is None: start_date = pytz.utc.localize(start_date)
-        now_utc = datetime.now(pytz.utc)
-        days_taken = (now_utc - start_date).days
-        if days_taken < 1: days_taken = 1
-        
-        # Calculate Word Count (Sum of all chunks)
-        pipeline = [
-            {"$match": {"book_id": book_id}},
-            {"$group": {"_id": None, "total_words": {"$sum": "$word_count"}}}
-        ]
-        result = list(local_db.chunks.aggregate(pipeline))
-        total_words = result[0]['total_words'] if result else 0
+        book = conn.execute("SELECT * FROM books WHERE id = ?", (sub["book_id"],)).fetchone()
+        if not book:
+            return False, f"Book '{sub['book_id']}' is not in the library"
 
-        print(f"    [Victory] Generating smart recommendations for {user_id}...")
+        first_seq = sub["current_sequence"]
+        rows = conn.execute(
+            """SELECT sequence, content FROM chunks
+               WHERE book_id = ? AND sequence >= ? AND sequence < ?
+               ORDER BY sequence""",
+            (sub["book_id"], first_seq, first_seq + sub["chunks_per_day"]),
+        ).fetchall()
 
-        # A. Determine which books the user has already read (by parent_id)
-        # Find all completed subscriptions for the user
-        completed_subs = local_db.subscriptions.find({"user_id": user_id, "status": "completed"})
-        completed_book_ids = [sub['book_id'] for sub in completed_subs]
+        # Out of chunks means they finished the book.
+        if not rows:
+            return send_victory(conn, sub, book, email, dry_run=dry_run)
 
-        # Get the parent_ids for all completed books
-        read_parent_ids_cursor = local_db.books.find({"book_id": {"$in": completed_book_ids}}, {"parent_id": 1})
-        read_parent_ids = {b['parent_id'] for b in read_parent_ids_cursor if 'parent_id' in b}
+        last_seq = rows[-1]["sequence"]
+        content = "\n\n".join(row["content"] for row in rows)
+        total_chunks = book["total_chunks"] or last_seq
 
-        # Also add the parent_id of the book just finished
-        current_book_info = local_db.books.find_one({"book_id": book_id})
-        if current_book_info and 'parent_id' in current_book_info:
-            read_parent_ids.add(current_book_info['parent_id'])
-        
-        # B. Get Titles of Read Books (for the AI Prompt)
-        # We just need a list of titles like ["Dracula", "Frankenstein"]
-        read_titles = local_db.books.distinct("title", {"parent_id": {"$in": list(read_parent_ids)}})
+        # The recap is already in the database: chunk N's recap covers the
+        # story through chunk N, so the one before this delivery is the
+        # "previously" text, whatever chunks_per_day happens to be.
+        recap = None
+        if first_seq > 1:
+            previous = conn.execute(
+                "SELECT recap FROM chunks WHERE book_id = ? AND sequence = ?",
+                (sub["book_id"], first_seq - 1),
+            ).fetchone()
+            recap = previous["recap"] if previous else None
 
-        # C. Fetch Available Library (Only 'standard' edition candidates, excluding read ones)
-        # We filter by parent_id not being in our read list
-        available_cursor = local_db.books.find(
-            {
-                "parent_id": {"$nin": list(read_parent_ids)},
-                "chunk_size": 750 # Only recommend Standard editions to keep list clean
-            },
-            {"book_id": 1, "title": 1, "author": 1}
+        part_label = (f"Part {first_seq}" if first_seq == last_seq
+                      else f"Parts {first_seq}-{last_seq}")
+        subject = f"dailyLitBits: {book['title']} ({part_label} of {total_chunks})"
+        html_body = format_email_html(
+            book["title"], first_seq, last_seq, total_chunks, content,
+            security.generate_unsub_token(sub["id"]),
+            security.generate_next_token(sub["id"]),
+            security.generate_dashboard_token(sub["user_id"]),
+            recap,
         )
 
-        library_catalog = []
-        for b in available_cursor:
-            library_catalog.append({
-                "id": b['book_id'],
-                "title": b['title'],
-                "author": b.get('author', 'Unknown')
-            })
+        if dry_run:
+            return True, (f"[dry run] {subject} - {len(rows)} chunk(s), "
+                          f"{len(html_body)} bytes, recap {'yes' if recap else 'no'}")
 
-        # D. Get AI Picks
-        suggestions = []
-        if library_catalog:
-            # Only ask AI if we have books to suggest
-            recommended_ids = ai.get_recommendations(read_titles, library_catalog)
+        if not send_via_brevo(email, subject, html_body):
+            return False, "Failed to send email"
 
-            if recommended_ids:
-                # Fetch the full book objects for the IDs returned by AI
-                suggestions = list(local_db.books.find({"book_id": {"$in": recommended_ids}}))
+        conn.execute(
+            "UPDATE subscriptions SET current_sequence = ?, last_sent = ? WHERE id = ?",
+            (last_seq + 1, utc_now(), sub["id"]),
+        )
+        return True, f"Sent {part_label} of {total_chunks}."
+    finally:
+        if owns_conn:
+            conn.close()
 
-        # E. Fallback (If AI fails or returns nothing, use random)
+
+def send_victory(conn, sub, book, email, dry_run=False):
+    """The 'you finished it' email: stats, what to read next, queue handover."""
+    started = parse_ts(sub["created_at"]) or datetime.now(pytz.utc)
+    days_taken = max((datetime.now(pytz.utc) - started).days, 1)
+
+    # Don't recommend anything they have already finished.
+    read_ids = [r["book_id"] for r in conn.execute(
+        "SELECT book_id FROM subscriptions WHERE user_id = ? AND status = 'completed'",
+        (sub["user_id"],))]
+    read_ids.append(sub["book_id"])
+    holes = ",".join("?" * len(read_ids))
+
+    available = conn.execute(
+        f"SELECT id, title, author FROM books WHERE id NOT IN ({holes}) ORDER BY title",
+        read_ids).fetchall()
+    read_titles = [r["title"] for r in conn.execute(
+        f"SELECT title FROM books WHERE id IN ({holes})", read_ids)]
+
+    suggestions = []
+    if available:
+        catalog = [{"id": r["id"], "title": r["title"], "author": r["author"] or "Unknown"}
+                   for r in available]
+        picked = ai.get_recommendations(read_titles, catalog)
+        if picked:
+            spots = ",".join("?" * len(picked))
+            # dicts, not sqlite3.Row: format_victory_email uses .get()
+            suggestions = [dict(row) for row in conn.execute(
+                f"SELECT id, title, author FROM books WHERE id IN ({spots})", picked)]
         if not suggestions:
-            print("   [Victory] AI failed or no result. Falling back to random.")
-            suggestions = list(local_db.books.aggregate([
-                {"$match": {
-                    "parent_id": {"$nin": list(read_parent_ids)},
-                    "chunk_size": 750
-                }},
-                {"$sample": {"size": 3}}
-            ]))
-        
-        # --- ACTIVATE NEXT QUEUED BOOK ---
-        next_queued_sub = local_db.subscriptions.find_one(
-            {"user_id": user_id, "status": "queued"},
-            sort=[("created_at", 1)] # Get the oldest one
-        )
+            print("   [Victory] No AI picks; falling back to a random three.")
+            suggestions = [dict(row) for row in random.sample(available, min(3, len(available)))]
 
-        next_book_title = None
-        if next_queued_sub:
-            print(f"   [Victory] Activating next queued book for {user_id}: {next_queued_sub['book_id']}")
-            local_db.subscriptions.update_one(
-                {"_id": next_queued_sub['_id']},
-                {"$set": {
-                    "status": "active", 
-                    "current_sequence": 1, 
-                    "created_at": datetime.now(), # Reset stats for the new book
-                    "last_sent": None # Allows immediate sending of the first part
-                }}
-            )
-            # Fetch title for email notification
-            next_book_info = local_db.books.find_one({"book_id": next_queued_sub['book_id']})
-            if next_book_info:
-                next_book_title = next_book_info['title']
-        # --------------------------------
+    # Promote whatever they queued next.
+    next_sub = conn.execute(
+        """SELECT * FROM subscriptions WHERE user_id = ? AND status = 'queued'
+           ORDER BY created_at LIMIT 1""", (sub["user_id"],)).fetchone()
 
-        # F. Send Victory Email
-        switch_token = security.generate_binge_token(sub_id)
-        current_book_info = local_db.books.find_one({"book_id": book_id})
-        book_title = current_book_info['title'] if current_book_info else "Your Book" 
-        subject = f"You finished {book_title}!"
+    next_title = None
+    if next_sub:
+        conn.execute(
+            """UPDATE subscriptions
+               SET status = 'active', current_sequence = 1, created_at = ?, last_sent = NULL
+               WHERE id = ?""", (utc_now(), next_sub["id"]))
+        row = conn.execute("SELECT title FROM books WHERE id = ?",
+                           (next_sub["book_id"],)).fetchone()
+        next_title = row["title"] if row else None
 
-        # --- MODIFY VICTORY EMAIL CONTENT ---        
-        victory_message = f"Congratulations! You have finished <strong>{book_title}</strong>."
-        if next_book_title:
-            victory_message += f"<p style=\"margin-top: 20px;\">Your next book, <strong>{next_book_title}</strong>, will start arriving tomorrow!</p>"
-        
-        html_body = format_victory_email(book_title, days_taken, total_words, suggestions, switch_token, additional_message=victory_message)
-        if send_via_brevo(email, subject, html_body):
-            local_db.subscriptions.update_one(
-                {"_id": ObjectId(sub_id)},
-                {"$set": {"status": "completed", "last_sent": datetime.now(pytz.utc)}}
-            )
-            return True, "Victory email sent."
+    message = f"Congratulations! You have finished <strong>{book['title']}</strong>."
+    if next_title:
+        message += (f"<p style=\"margin-top: 20px;\">Your next book, "
+                    f"<strong>{next_title}</strong>, starts arriving tomorrow!</p>")
+
+    subject = f"You finished {book['title']}!"
+    html_body = format_victory_email(
+        book["title"], days_taken, book["total_words"], suggestions,
+        security.generate_dashboard_token(sub["user_id"]), message)
+
+    if dry_run:
+        return True, (f"[dry run] {subject} - {len(suggestions)} suggestion(s)"
+                      + (f", queued '{next_title}' promoted" if next_title else ""))
+
+    if not send_via_brevo(email, subject, html_body):
+        return False, "Failed to send victory email"
+
+    conn.execute("UPDATE subscriptions SET status = 'completed', last_sent = ? WHERE id = ?",
+                 (utc_now(), sub["id"]))
+    return True, "Victory email sent."
+
+
+def run_cron(conn, dry_run=False):
+    """Every active subscription gets asked; most answer 'not my hour'."""
+    print("Running dispatch.py in cron mode...")
+    rows = conn.execute("SELECT id FROM subscriptions WHERE status = 'active'").fetchall()
+
+    if not rows:
+        print("   No active subscriptions found.")
+        return
+
+    sent = 0
+    for row in rows:
+        ok, message = process_subscription(row["id"], trigger="cron", conn=conn,
+                                           dry_run=dry_run)
+        if ok:
+            sent += 1
+            print(f"   [{row['id']}] {message}")
         else:
-            return False, "Failed to send victory email."
-    
-    # --- REGULAR DISPATCH LOGIC ---
-    if not chunk:
-        # This case should ideally not be reached if victory logic is correct,
-        # but as a safeguard, we mark subscription complete if no chunk found
-        local_db.subscriptions.update_one(
-            {"_id": ObjectId(sub_id)},
-            {"$set": {"status": "completed"}}
-        )
-        return False, "No chunk found for current sequence. Subscription marked completed."
+            print(f"   [{row['id']}] skipped: {message}")
 
-    # Fetch total chunks for progress display
-    total_chunks = local_db.chunks.count_documents({"book_id": book_id})
+    print(f"--- RUN COMPLETE. Sent {sent} emails. ---")
 
-    # Generate tokens for unsubscribe and binge reading
-    unsub_token = security.generate_unsub_token(email)
-    binge_token = security.generate_binge_token(sub_id)
-
-    # Get recap if not the first chunk
-    recap_text = None
-    if seq > 1:
-        prev_chunk = local_db.chunks.find_one({"book_id": book_id, "sequence": seq - 1})
-        if prev_chunk:
-            print(f"    [AI] Generating recap for chunk {seq} of {book_id}...")
-            recap_text = ai.generate_recap(prev_chunk['content'])
-
-    # Format and send email
-    current_book_info = local_db.books.find_one({"book_id": book_id})
-    book_title = current_book_info['title'] if current_book_info else "dailyLitBits"
-    subject = f"dailyLitBits: {book_title} (Part {seq}/{total_chunks})"
-    
-    html_body = format_email_html(
-        book_title, seq, total_chunks, chunk['content'], unsub_token, binge_token, recap_text
-    )
-
-    if send_via_brevo(email, subject, html_body):
-        # Update subscription for next dispatch
-        local_db.subscriptions.update_one(
-            {"_id": ObjectId(sub_id)},
-            {
-                "$inc": {"current_sequence": 1},
-                "$set": {"last_sent": datetime.now(pytz.utc)}
-            }
-        )
-        return True, "Email dispatched successfully."
-    else:
-        return False, "Failed to send email."
-
-
-# --- Database and Cipher Initialization Functions ---
-def initialize_db():
-    """Initializes and returns the MongoDB client and db object."""
-    try:
-        client = MongoClient(config.MONGO_URI)
-        # The ismaster command is cheap and does not require auth.
-        client.admin.command('ismaster') 
-        db = client[config.DB_NAME]
-        print("MongoDB connection established successfully.")
-        return client, db
-    except Exception as e:
-        print(f"   [ERROR] Failed to connect to MongoDB: {e}")
-        # Raise the exception to stop execution if DB connection fails
-        raise
-
-def initialize_cipher():
-    """Initializes and returns the Fernet cipher."""
-    try:
-        cipher = Fernet(config.ENCRYPTION_KEY)
-        print("Fernet cipher initialized successfully.")
-        return cipher
-    except Exception as e:
-        print(f"   [ERROR] Failed to initialize Fernet cipher: {e}")
-        # Raise the exception to stop execution if cipher fails
-        raise
 
 if __name__ == "__main__":
-    # Initialize DB and Cipher here
-    try:
-        # These are now available globally within this script's execution context
-        client, db = initialize_db() 
-        cipher = initialize_cipher()
-    except Exception as e:
-        # If initialization fails, exit.
-        print(f"Critical initialization failed: {e}")
-        exit(1) # Exit with an error code
-
-    parser = argparse.ArgumentParser(description="Dispatch emails for dailyLitBits.")
-    subparsers = parser.add_subparsers(dest='command', help='Command to execute')
-
-    # Subparser for the 'cron' command (default behavior)
-    parser_cron = subparsers.add_parser('cron', help='Run dispatch for all active subscriptions (default).')
-    parser_cron.set_defaults(func=run_cron)
-
-    # Subparser for the 'force' command
-    parser_force = subparsers.add_parser('force', help='Force dispatch for a specific subscription ID.')
-    parser_force.add_argument('sub_id', type=str, help='The ID of the subscription to force dispatch for.')
-    parser_force.set_defaults(func=lambda args: run_force(args.sub_id))
-
+    parser = argparse.ArgumentParser(description="Send dailyLitBits deliveries")
+    parser.add_argument("mode", nargs="?", default="cron", choices=["cron", "force"],
+                        help="cron (default) walks every active subscription; "
+                             "force sends one now, ignoring the delivery hour")
+    parser.add_argument("sub_id", nargs="?", type=int, help="subscription id, for force")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Build the email but do not send it")
     args = parser.parse_args()
 
-    # If no command is specified, default to 'cron'
-    if hasattr(args, 'command') and args.command is None:
-        run_cron()
-    elif hasattr(args, 'func'):
-        args.func(args)
-    else:
-        # Fallback if no command is recognized or if help is implicitly shown
-        parser.print_help()
+    conn = db.get_db()
+    try:
+        if args.mode == "force":
+            if not args.sub_id:
+                parser.error("force mode needs a subscription id")
+            ok, message = process_subscription(args.sub_id, trigger="next", conn=conn,
+                                               dry_run=args.dry_run)
+            print(("OK: " if ok else "FAILED: ") + message)
+        else:
+            run_cron(conn, dry_run=args.dry_run)
+    finally:
+        conn.close()
