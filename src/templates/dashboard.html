@@ -38,15 +38,20 @@
                         <h3>{{ book_title }}</h3>
                         <p class="text-muted">by {{ book_author }}</p>
 
-                        <div class="progress mb-3">
-                            <div class="progress-bar bg-success" role="progressbar" style="width: {{ percent }}%;">
-                                Part {{ current }} of {{ total }}
+                        {# The label used to sit inside the filled portion, so early in a
+                           book it was clipped to a few letters - "Par" at 3% of 165 parts.
+                           It lives under the bar now, where it reads at any width. #}
+                        <div class="progress mb-2">
+                            <div class="progress-bar bg-success" role="progressbar"
+                                style="width: {{ percent }}%;" aria-label="Reading progress"
+                                aria-valuenow="{{ percent }}" aria-valuemin="0" aria-valuemax="100">
                             </div>
                         </div>
 
                         <div class="d-flex justify-content-between text-muted small">
                             <span>Started: {{ start_date }}</span>
-                            <span>{{ percent }}% Complete</span>
+                            <span><strong>Part {{ current }} of {{ total }}</strong>
+                                &middot; {{ percent }}% complete</span>
                         </div>
                     </div>
                 </div>
@@ -60,24 +65,35 @@
                 </div>
                 {% endif %}
 
-                <!-- CARD 1.5: UP NEXT QUEUE -->
-                {% if queued_books and queued_books|length > 0 %}
+                <!-- CARD 1.5: QUEUED AND PAUSED BOOKS -->
+                {% if other_books %}
                 <div class="card shadow-sm mb-4">
                     <div class="card-header">
-                        <h5 class="mb-0">Up Next</h5>
+                        <h5 class="mb-0">Your Other Books</h5>
                     </div>
                     <div class="card-body">
-                        {% for book in queued_books %}
+                        <p class="text-muted small mb-3">
+                            Starting or resuming one of these moves your current book to the
+                            queue &mdash; it keeps its place either way.
+                        </p>
+                        {% for book in other_books %}
                         <div
                             class="d-flex justify-content-between align-items-center mb-3 pb-3 border-bottom last-child-no-border">
                             <div>
                                 <strong class="d-block">{{ book.title }}</strong>
                                 <span class="text-muted small">by {{ book.author }}</span>
+                                {% if book.status == 'paused' %}
+                                <span class="badge bg-warning text-dark ms-1">Paused</span>
+                                <span class="text-muted small">at part {{ book.current_sequence }}
+                                    of {{ book.total_chunks }}</span>
+                                {% else %}
+                                <span class="badge bg-secondary ms-1">Queued</span>
+                                {% endif %}
                             </div>
                             <div>
                                 <a href="/switch_book?token={{ token }}&new_book_id={{ book.book_id }}"
-                                    class="btn btn-sm btn-outline-primary">
-                                    Start Reading
+                                    class="btn btn-sm {{ 'btn-success' if book.status == 'paused' else 'btn-outline-primary' }}">
+                                    {{ 'Resume' if book.status == 'paused' else 'Start Reading' }}
                                 </a>
                                 <!-- Bonus: Remove button - would need a new route/form -->
                                 <!-- <button class="btn btn-sm btn-outline-danger ms-2">Remove</button> -->

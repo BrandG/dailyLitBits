@@ -10,7 +10,7 @@
 -- db.init_db() applies this on every connection, so every statement here
 -- must stay idempotent.
 
-PRAGMA user_version = 1;
+PRAGMA user_version = 2;
 
 CREATE TABLE IF NOT EXISTS users (
     id           INTEGER PRIMARY KEY,
@@ -82,3 +82,24 @@ CREATE TABLE IF NOT EXISTS suggestions (
                  CHECK (status IN ('pending', 'approved', 'rejected')),
     submitted_at TEXT    NOT NULL
 );
+
+-- What happened, for metrics. events.py holds the rules that keep this inside
+-- the privacy policy; the short version is that identity never goes in here.
+CREATE TABLE IF NOT EXISTS events (
+    id              INTEGER PRIMARY KEY,
+    occurred_at     TEXT    NOT NULL,
+    event           TEXT    NOT NULL,
+    -- ON DELETE SET NULL rather than CASCADE: honouring a deletion request
+    -- must leave an unlinkable row behind, not erase the churn data the
+    -- metrics are for.
+    subscription_id INTEGER REFERENCES subscriptions(id) ON DELETE SET NULL,
+    -- Deliberately not a foreign key: removing a book from the library should
+    -- not rewrite history.
+    book_id         TEXT,
+    sequence        INTEGER,
+    -- JSON, restricted to events.ALLOWED_DETAIL.
+    detail          TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_events_kind ON events(event, occurred_at);
+CREATE INDEX IF NOT EXISTS idx_events_sub  ON events(subscription_id);

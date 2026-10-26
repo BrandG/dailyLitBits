@@ -16,6 +16,24 @@ DailyLitBits Roadmap
 
 - Backup Restore Test: You have a script that makes backups. Have you ever tried to restore one? (A backup you haven't restored is just a file taking up space). 
 
+- Stale Subscription Audit: a job that walks the database for subscriptions that
+  have gone quiet, and either nudges the reader or clears the entry.
+	* Prerequisite: there is no record of WHEN a status changed. last_sent is the
+	  wrong clock for a paused book (it is when it last sent, usually just before
+	  pausing), and created_at never moves. Nothing can measure "paused for 90
+	  days" until a status_changed_at column exists and is maintained.
+	* Pausing means "stop emailing me", so a reminder is in tension with the
+	  promise Vacation Mode makes. If we send one: a long threshold, once only,
+	  never repeated, and the unsubscribe link has to be in it.
+	* Do NOT delete a paused subscription outright. current_sequence is the
+	  reader's place in the book, and it is the only copy. Retire it to a
+	  dormant state and keep the row, or nudge first and only clear after no
+	  response.
+	* Queued subscriptions have the same problem in a quieter way: if a reader
+	  never finishes their active book, everything behind it waits forever.
+	* Whatever it does, it should REPORT by default and need an explicit flag
+	  to act - the same shape as summarize.py, and for the same reason.
+
 - "Dead Letter" Monitoring: We need a way to see chunks that permanently failed the AI process (e.g., if the text was corrupt). A simple Admin Dashboard view for "Failed Chunks" would be smart. 
 
 - What if someone wanted to read multiple books per day? Could we allow that? It would certainly be a premium service.

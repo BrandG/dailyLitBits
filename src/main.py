@@ -21,6 +21,7 @@ from fastapi.templating import Jinja2Templates
 import config
 import db
 import dispatch
+import events
 import security
 from security import verify_unsub_token, verify_next_token, verify_dashboard_token
 from user_manager import UserManager
@@ -230,13 +231,16 @@ async def handle_signup(
             ).fetchone()[0]
             status = "active" if active_count == 0 else "queued"
 
-            conn.execute(
+            cur = conn.execute(
                 """INSERT INTO subscriptions
                        (user_id, book_id, status, current_sequence, chunks_per_day,
                         delivery_hour, last_sent, created_at)
                    VALUES (?, ?, ?, 1, ?, ?, NULL, ?)""",
                 (user_id, book_id, status, chunks_per_day, dispatch.TARGET_HOUR, utc_now()),
             )
+            events.record(conn, "subscribed", subscription_id=cur.lastrowid,
+                          book_id=book_id, sequence=1, status=status,
+                          chunks_per_day=chunks_per_day)
     except _AlreadySubscribed as already:
         return templates.TemplateResponse("index.html", {
             "request": request, "books": book_choices(conn), "message": str(already),
@@ -303,19 +307,27 @@ async def profile_page(request: Request, token: str, conn=Depends(get_db)):
         (user["id"],),
     ).fetchone()
 
-    queued = conn.execute(
-        """SELECT s.id AS subscription_id, b.id AS book_id, b.title, b.author
+    # Everything the reader has on the go but is not currently receiving.
+    # Paused subscriptions MUST appear here: a paused book sends no email, so
+    # the dashboard is the only place its reader can reach it. Listing only
+    # 'queued' left a paused book invisible whenever another was active, with
+    # its reading position stranded in the database.
+    others = conn.execute(
+        """SELECT s.id AS subscription_id, s.status, s.current_sequence,
+                  b.id AS book_id, b.title, b.author, b.total_chunks
            FROM subscriptions s JOIN books b ON b.id = s.book_id
-           WHERE s.user_id = ? AND s.status = 'queued' ORDER BY s.created_at""",
-        (user["id"],),
+           WHERE s.user_id = ? AND s.status IN ('queued', 'paused') AND s.id != ?
+           ORDER BY CASE s.status WHEN 'paused' THEN 0 ELSE 1 END, s.created_at""",
+        (user["id"], current["id"] if current else -1),
     ).fetchall()
 
+    # NB: `current` is resolved above, because `others` excludes it by id.
     context = {
         "request": request,
         "token": token,
         "user_tz": user["timezone"],
         "is_admin": user["role"] == "admin",
-        "queued_books": [dict(row) for row in queued],
+        "other_books": [dict(row) for row in others],
         "sub_id": None,
         "book_title": None,
     }
@@ -352,8 +364,13 @@ async def toggle_pause(token: str = Form(...), sub_id: int = Form(...), conn=Dep
     if not sub:
         return invalid_link("Subscription not found")
 
-    conn.execute("UPDATE subscriptions SET status = ? WHERE id = ?",
-                 ("paused" if sub["status"] == "active" else "active", sub_id))
+    new_status = "paused" if sub["status"] == "active" else "active"
+    with db.transaction(conn):
+        conn.execute("UPDATE subscriptions SET status = ? WHERE id = ?", (new_status, sub_id))
+        events.record(conn, "paused" if new_status == "paused" else "resumed",
+                      subscription_id=sub_id, book_id=sub["book_id"],
+                      sequence=sub["current_sequence"])
+
     return RedirectResponse(url=f"/profile?token={token}", status_code=303)
 
 
@@ -378,10 +395,15 @@ async def update_preferences(
     # point of dropping the three-edition scheme.
     with db.transaction(conn):
         UserManager(conn).set_timezone(user["id"], timezone_name)
+        hour = max(0, min(delivery_hour, 23))
+        parts = max(1, min(chunks_per_day, 12))
         conn.execute(
             "UPDATE subscriptions SET delivery_hour = ?, chunks_per_day = ? WHERE id = ?",
-            (max(0, min(delivery_hour, 23)), max(1, min(chunks_per_day, 12)), sub_id),
+            (hour, parts, sub_id),
         )
+        events.record(conn, "prefs_changed", subscription_id=sub_id,
+                      book_id=sub["book_id"], sequence=sub["current_sequence"],
+                      timezone=timezone_name, delivery_hour=hour, chunks_per_day=parts)
 
     return RedirectResponse(url=f"/profile?token={token}", status_code=303)
 
@@ -400,11 +422,22 @@ async def switch_book(token: str, new_book_id: str, conn=Depends(get_db)):
 
     with db.transaction(conn):
         # Whatever they were reading steps aside, keeping its place.
+        stepping_aside = conn.execute(
+            """SELECT id, book_id, current_sequence FROM subscriptions
+               WHERE user_id = ? AND status IN ('active', 'paused')""",
+            (user["id"],),
+        ).fetchall()
+
         conn.execute(
             """UPDATE subscriptions SET status = 'queued'
                WHERE user_id = ? AND status IN ('active', 'paused')""",
             (user["id"],),
         )
+
+        for aside in stepping_aside:
+            if aside["book_id"] != new_book_id:
+                events.record(conn, "queued", subscription_id=aside["id"],
+                              book_id=aside["book_id"], sequence=aside["current_sequence"])
 
         existing = conn.execute(
             """SELECT * FROM subscriptions WHERE user_id = ? AND book_id = ?
@@ -418,14 +451,19 @@ async def switch_book(token: str, new_book_id: str, conn=Depends(get_db)):
                 "UPDATE subscriptions SET status = 'active', last_sent = NULL WHERE id = ?",
                 (existing["id"],),
             )
+            events.record(conn, "switched", subscription_id=existing["id"],
+                          book_id=new_book_id, sequence=existing["current_sequence"],
+                          to_book=new_book_id)
         else:
-            conn.execute(
+            fresh = conn.execute(
                 """INSERT INTO subscriptions
                        (user_id, book_id, status, current_sequence, chunks_per_day,
                         delivery_hour, last_sent, created_at)
                    VALUES (?, ?, 'active', 1, 2, ?, NULL, ?)""",
                 (user["id"], new_book_id, dispatch.TARGET_HOUR, utc_now()),
             )
+            events.record(conn, "switched", subscription_id=fresh.lastrowid,
+                          book_id=new_book_id, sequence=1, to_book=new_book_id)
 
     return simple_page(
         "You're switched!",
@@ -479,10 +517,17 @@ async def unsubscribe_process(token: str = Form(...), conn=Depends(get_db)):
     if not sub_id:
         return invalid_link()
 
-    cur = conn.execute(
-        "UPDATE subscriptions SET status = 'unsubscribed' WHERE id = ? AND status != 'unsubscribed'",
-        (int(sub_id),),
-    )
+    sub = conn.execute("SELECT book_id, current_sequence FROM subscriptions WHERE id = ?",
+                       (int(sub_id),)).fetchone()
+    with db.transaction(conn):
+        cur = conn.execute(
+            "UPDATE subscriptions SET status = 'unsubscribed' "
+            "WHERE id = ? AND status != 'unsubscribed'",
+            (int(sub_id),),
+        )
+        if cur.rowcount and sub:
+            events.record(conn, "unsubscribed", subscription_id=int(sub_id),
+                          book_id=sub["book_id"], sequence=sub["current_sequence"])
     return simple_page(
         "Unsubscribe",
         "<p>You have been unsubscribed.</p>" if cur.rowcount

@@ -18,6 +18,7 @@ import pytz
 import ai
 import config
 import db
+import events
 import security
 from user_manager import UserManager
 
@@ -326,6 +327,9 @@ def process_subscription(sub_id, trigger="cron", conn=None, dry_run=False):
             "UPDATE subscriptions SET current_sequence = ?, last_sent = ? WHERE id = ?",
             (last_seq + 1, utc_now(), sub["id"]),
         )
+        events.record(conn, "delivered", subscription_id=sub["id"],
+                      book_id=sub["book_id"], sequence=first_seq,
+                      parts=len(rows), trigger=trigger)
         return True, f"Sent {part_label} of {total_chunks}."
     finally:
         if owns_conn:
@@ -375,6 +379,8 @@ def send_victory(conn, sub, book, email, dry_run=False):
             """UPDATE subscriptions
                SET status = 'active', current_sequence = 1, created_at = ?, last_sent = NULL
                WHERE id = ?""", (utc_now(), next_sub["id"]))
+        events.record(conn, "resumed", subscription_id=next_sub["id"],
+                      book_id=next_sub["book_id"], sequence=1)
         row = conn.execute("SELECT title FROM books WHERE id = ?",
                            (next_sub["book_id"],)).fetchone()
         next_title = row["title"] if row else None
@@ -398,6 +404,8 @@ def send_victory(conn, sub, book, email, dry_run=False):
 
     conn.execute("UPDATE subscriptions SET status = 'completed', last_sent = ? WHERE id = ?",
                  (utc_now(), sub["id"]))
+    events.record(conn, "completed", subscription_id=sub["id"],
+                  book_id=sub["book_id"], sequence=sub["current_sequence"])
     return True, "Victory email sent."
 
 

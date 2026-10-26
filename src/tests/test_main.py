@@ -267,3 +267,71 @@ def test_suggestion_is_stored(client, conn):
     row = conn.execute("SELECT * FROM suggestions").fetchone()
     assert row["title"] == "Moby Dick"
     assert row["status"] == "pending"
+
+
+# --- PAUSED SUBSCRIPTIONS ---
+
+def _add_paused_book(conn, user_id, book_id="pgpaused", title="The Paused Book", at=4):
+    conn.execute(
+        """INSERT INTO books (id, title, author, total_chunks, total_words, created_at)
+           VALUES (?, ?, 'Someone', 10, 3000, '2026-01-01T00:00:00+00:00')""",
+        (book_id, title))
+    conn.executemany(
+        "INSERT INTO chunks (book_id, sequence, content, word_count) VALUES (?, ?, ?, ?)",
+        [(book_id, n, f"paused text {n}", 300) for n in range(1, 11)])
+    cur = conn.execute(
+        """INSERT INTO subscriptions (user_id, book_id, status, current_sequence,
+               chunks_per_day, delivery_hour, created_at)
+           VALUES (?, ?, 'paused', ?, 2, 6, '2026-01-01T00:00:00+00:00')""",
+        (user_id, book_id, at))
+    return cur.lastrowid
+
+
+def test_a_paused_book_is_visible_when_another_is_active(client, conn, reader):
+    """A paused book sends no email, so the dashboard is the only way back to
+    it. Listing only 'queued' left it stranded with its position intact."""
+    user_id, _ = reader
+    _add_paused_book(conn, user_id)
+
+    page = client.get(f"/profile?token={security.generate_dashboard_token(user_id)}").text
+
+    assert "Test Book" in page            # the active one still shown
+    assert "The Paused Book" in page      # and the paused one is reachable
+    assert "Resume" in page
+    assert "part 4" in page               # with the place it was left at
+
+
+def test_resuming_a_paused_book_keeps_its_place_and_queues_the_active_one(client, conn, reader):
+    user_id, active_sub = reader
+    paused_sub = _add_paused_book(conn, user_id)
+
+    response = client.get(
+        f"/switch_book?token={security.generate_dashboard_token(user_id)}"
+        f"&new_book_id=pgpaused")
+    assert response.status_code == 200
+
+    resumed = conn.execute("SELECT * FROM subscriptions WHERE id = ?", (paused_sub,)).fetchone()
+    previous = conn.execute("SELECT * FROM subscriptions WHERE id = ?", (active_sub,)).fetchone()
+
+    assert resumed["status"] == "active"
+    assert resumed["current_sequence"] == 4      # resumed, not restarted
+    assert previous["status"] == "queued"        # one active subscription at a time
+    assert previous["current_sequence"] == 1     # and it kept its own place
+
+
+def test_the_current_book_is_not_also_listed_below(client, conn, reader):
+    user_id, _ = reader
+    page = client.get(f"/profile?token={security.generate_dashboard_token(user_id)}").text
+    assert page.count("Test Book") == 1
+
+
+def test_progress_label_is_not_inside_the_coloured_fill(client, conn, reader):
+    """Early in a book the fill is too narrow to hold its own label - at part 5
+    of 165 it rendered as 'Par'. The label belongs under the bar."""
+    user_id, _ = reader
+    page = client.get(f"/profile?token={security.generate_dashboard_token(user_id)}").text
+
+    fill = re.search(r'<div class="progress-bar[^>]*>(.*?)</div>', page, re.S)
+    assert fill is not None
+    assert fill.group(1).strip() == ""
+    assert "Part 1 of 10" in page

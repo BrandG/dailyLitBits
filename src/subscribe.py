@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 
 import db
 import dispatch
+import events
 from user_manager import UserManager
 
 
@@ -58,6 +59,8 @@ def subscribe_user(email, book_id, chunks_per_day=2, delivery_hour=None, conn=No
                 (user_id, book_id, status, chunks_per_day, delivery_hour, utc_now()),
             )
             sub_id = cur.lastrowid
+            events.record(conn, "subscribed", subscription_id=sub_id, book_id=book_id,
+                          sequence=1, status=status, chunks_per_day=chunks_per_day)
 
         who = "new reader" if created else "existing reader"
         return True, f"Subscribed ({who}) to '{book['title']}' as {status}.", sub_id

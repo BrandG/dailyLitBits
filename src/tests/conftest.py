@@ -32,7 +32,9 @@ WORDS_PER_CHUNK = 320
 def conn():
     """A clean database for every test."""
     connection = db.get_db()
-    for table in ("chunks", "subscriptions", "books", "users", "suggestions"):
+    # events first: it references subscriptions, and rows left behind would
+    # leak between tests that assert on the exact contents of the log.
+    for table in ("events", "chunks", "subscriptions", "books", "users", "suggestions"):
         connection.execute(f"DELETE FROM {table}")
     yield connection
     connection.close()
