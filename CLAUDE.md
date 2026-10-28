@@ -606,12 +606,15 @@ are read at import time and will fail the whole run if missing.
 6. **One active subscription per user** - Enforced in signup logic; the rest queue
 7. **Changing `chunks_per_day` must never reset progress** - that was the bug in
    the old edition switcher, and there is a test for it
-7. **Timezone-aware timestamps** - Use `pytz` for all timezone operations
-8. **Rate limiting on binge reads** - 5-minute cooldown between manual dispatches
-9. **The database is not ours** - MongoDB is the container owned by the BlueHorseshoe
-   stack and shared over the external `docker_app_net` network. It requires
-   authentication, and a configuration change made over there can break this app
-   without anything here changing (see Incident Log).
+8. **Timezone-aware timestamps** - Use `pytz` for all timezone operations
+9. **Rate limiting on binge reads** - 5-minute cooldown between manual dispatches
+10. **The database is ours, and should stay that way** - `data/app.db` is this
+    project's own SQLite file, bind-mounted from the host. Neither the website
+    nor any cron job touches the shared BlueHorseshoe mongod any more; the only
+    things still pointed at it are the two unported `tools/` scripts, and
+    `MONGO_URI` exists for them alone. Nothing new here should depend on a
+    container another stack owns - that coupling is what cost seven months of
+    downtime (see Incident Log).
 
 ## Incident Log
 
