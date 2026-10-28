@@ -1,0 +1,472 @@
+/* dailyLitBits — one stylesheet for every page.
+ *
+ * Loaded after Bootstrap, which it steers by reassigning Bootstrap's own
+ * custom properties rather than fighting it with !important where that can be
+ * helped. Two themes: a warm paper light mode, and a dark mode that follows
+ * the reader's system setting. Everything below is expressed in tokens, so a
+ * palette change happens in one place.
+ */
+
+:root {
+    color-scheme: light dark;
+
+    --dlb-paper: #fbf8f3;
+    --dlb-surface: #ffffff;
+    --dlb-surface-2: #f3eee5;
+    --dlb-ink: #23201c;
+    --dlb-ink-muted: #6b625a;
+    --dlb-border: #e4dcd0;
+    --dlb-accent: #1f6b4f;
+    --dlb-accent-hover: #185740;
+    --dlb-accent-ink: #ffffff;
+    --dlb-accent-soft: rgba(31, 107, 79, .10);
+    --dlb-shadow: 0 1px 2px rgba(35, 32, 28, .04), 0 8px 24px rgba(35, 32, 28, .06);
+
+    --dlb-serif: Georgia, 'Iowan Old Style', 'Palatino Linotype', 'Times New Roman', serif;
+    --dlb-sans: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+
+    /* Hand the tokens to Bootstrap. */
+    --bs-body-bg: var(--dlb-paper);
+    --bs-body-color: var(--dlb-ink);
+    --bs-emphasis-color: var(--dlb-ink);
+    --bs-secondary-color: var(--dlb-ink-muted);
+    --bs-tertiary-bg: var(--dlb-surface-2);
+    --bs-border-color: var(--dlb-border);
+    --bs-link-color: var(--dlb-accent);
+    --bs-link-hover-color: var(--dlb-accent-hover);
+    --bs-font-sans-serif: var(--dlb-sans);
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --dlb-paper: #121311;
+        --dlb-surface: #1a1c19;
+        --dlb-surface-2: #23261f;
+        --dlb-ink: #ece7dd;
+        --dlb-ink-muted: #a39b8d;
+        --dlb-border: #2f3329;
+        --dlb-accent: #6cc295;
+        --dlb-accent-hover: #86d0a8;
+        --dlb-accent-ink: #0d1711;
+        --dlb-accent-soft: rgba(108, 194, 149, .14);
+        --dlb-shadow: none;
+    }
+}
+
+/* ---------- Base ---------- */
+
+body {
+    background-color: var(--dlb-paper);
+    color: var(--dlb-ink);
+    font-family: var(--dlb-sans);
+    -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3, h4, h5, .dlb-serif {
+    font-family: var(--dlb-serif);
+    color: var(--dlb-ink);
+    letter-spacing: -.01em;
+}
+
+a {
+    color: var(--dlb-accent);
+}
+
+a:hover {
+    color: var(--dlb-accent-hover);
+}
+
+:focus-visible {
+    outline: 3px solid var(--dlb-accent);
+    outline-offset: 2px;
+    border-radius: 4px;
+}
+
+/* Bootstrap utilities the templates lean on, retaught the palette. */
+.bg-light { background-color: var(--dlb-surface-2) !important; }
+.bg-white { background-color: var(--dlb-surface) !important; }
+.text-dark, .text-body { color: var(--dlb-ink) !important; }
+.text-muted, .text-secondary { color: var(--dlb-ink-muted) !important; }
+.text-success { color: var(--dlb-accent) !important; }
+.border, .border-top, .border-bottom { border-color: var(--dlb-border) !important; }
+
+.card {
+    background-color: var(--dlb-surface);
+    border: 1px solid var(--dlb-border);
+    border-radius: 12px;
+}
+
+.shadow-sm, .shadow {
+    box-shadow: var(--dlb-shadow) !important;
+}
+
+.card-header {
+    background-color: var(--dlb-surface-2);
+    border-bottom: 1px solid var(--dlb-border);
+    color: var(--dlb-ink);
+    font-family: var(--dlb-sans);
+    font-weight: 600;
+}
+
+/* ---------- Forms ---------- */
+
+.form-control, .form-select {
+    background-color: var(--dlb-surface);
+    border-color: var(--dlb-border);
+    color: var(--dlb-ink);
+    padding: .6rem .75rem;
+}
+
+.form-control:focus, .form-select:focus {
+    background-color: var(--dlb-surface);
+    border-color: var(--dlb-accent);
+    color: var(--dlb-ink);
+    box-shadow: 0 0 0 .2rem var(--dlb-accent-soft);
+}
+
+.form-control::placeholder { color: var(--dlb-ink-muted); opacity: .75; }
+.form-label { color: var(--dlb-ink); font-weight: 600; }
+.form-text { color: var(--dlb-ink-muted); }
+
+@media (prefers-color-scheme: dark) {
+    /* Bootstrap's chevron is a dark SVG baked into the rule; swap it. */
+    .form-select {
+        background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath fill='none' stroke='%23a39b8d' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='m2 5 6 6 6-6'/%3e%3c/svg%3e");
+    }
+}
+
+/* ---------- Buttons ---------- */
+
+.btn {
+    font-family: var(--dlb-sans);
+    font-weight: 600;
+    border-radius: 8px;
+    --bs-btn-padding-y: .55rem;
+    --bs-btn-padding-x: 1.1rem;
+}
+
+.btn-primary {
+    --bs-btn-bg: var(--dlb-accent);
+    --bs-btn-border-color: var(--dlb-accent);
+    --bs-btn-color: var(--dlb-accent-ink);
+    --bs-btn-hover-bg: var(--dlb-accent-hover);
+    --bs-btn-hover-border-color: var(--dlb-accent-hover);
+    --bs-btn-hover-color: var(--dlb-accent-ink);
+    --bs-btn-active-bg: var(--dlb-accent-hover);
+    --bs-btn-active-border-color: var(--dlb-accent-hover);
+    --bs-btn-active-color: var(--dlb-accent-ink);
+    --bs-btn-disabled-bg: var(--dlb-accent);
+    --bs-btn-disabled-border-color: var(--dlb-accent);
+    --bs-btn-disabled-color: var(--dlb-accent-ink);
+}
+
+.btn-outline-primary {
+    --bs-btn-color: var(--dlb-accent);
+    --bs-btn-border-color: var(--dlb-accent);
+    --bs-btn-bg: transparent;
+    --bs-btn-hover-bg: var(--dlb-accent);
+    --bs-btn-hover-border-color: var(--dlb-accent);
+    --bs-btn-hover-color: var(--dlb-accent-ink);
+    --bs-btn-active-bg: var(--dlb-accent);
+    --bs-btn-active-border-color: var(--dlb-accent);
+    --bs-btn-active-color: var(--dlb-accent-ink);
+}
+
+.btn-quiet {
+    --bs-btn-color: var(--dlb-ink-muted);
+    --bs-btn-border-color: var(--dlb-border);
+    --bs-btn-bg: transparent;
+    --bs-btn-hover-bg: var(--dlb-surface-2);
+    --bs-btn-hover-border-color: var(--dlb-border);
+    --bs-btn-hover-color: var(--dlb-ink);
+}
+
+.btn-link {
+    --bs-btn-color: var(--dlb-ink-muted);
+    --bs-btn-hover-color: var(--dlb-ink);
+    text-decoration: none;
+}
+
+/* ---------- Site chrome ---------- */
+
+.site-nav {
+    background-color: var(--dlb-surface);
+    border-bottom: 1px solid var(--dlb-border);
+    padding: .85rem 0;
+    margin-bottom: 3rem;
+}
+
+.site-nav .brand {
+    font-family: var(--dlb-serif);
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: var(--dlb-accent);
+    text-decoration: none;
+    letter-spacing: -.02em;
+}
+
+.site-nav .nav-link-quiet {
+    color: var(--dlb-ink-muted);
+    text-decoration: none;
+    font-size: .95rem;
+    font-weight: 500;
+    padding: .4rem .25rem;
+}
+
+.site-nav .nav-link-quiet:hover { color: var(--dlb-ink); }
+
+.site-footer {
+    color: var(--dlb-ink-muted);
+    font-size: .85rem;
+    padding: 3rem 0 2.5rem;
+    text-align: center;
+}
+
+.site-footer a { color: var(--dlb-ink-muted); text-decoration: none; }
+.site-footer a:hover { color: var(--dlb-accent); }
+
+/* ---------- Hero ---------- */
+
+.hero {
+    text-align: center;
+    margin: 1rem 0 2.5rem;
+}
+
+.hero h1 {
+    font-family: var(--dlb-serif);
+    font-size: clamp(2.25rem, 6vw, 3.5rem);
+    line-height: 1.1;
+    letter-spacing: -.03em;
+    margin-bottom: .6rem;
+}
+
+.hero p {
+    color: var(--dlb-ink-muted);
+    font-size: 1.15rem;
+    margin: 0 auto;
+    max-width: 34ch;
+}
+
+/* ---------- Reading / prose ---------- */
+
+.prose {
+    font-family: var(--dlb-serif);
+    font-size: 1.05rem;
+    line-height: 1.75;
+    max-width: 68ch;
+    margin: 0 auto;
+    color: var(--dlb-ink);
+}
+
+.prose h2 {
+    font-family: var(--dlb-sans);
+    font-size: 1.15rem;
+    font-weight: 700;
+    margin-top: 2.25rem;
+    margin-bottom: .6rem;
+}
+
+.prose li { margin-bottom: .4rem; }
+
+/* ---------- Library ---------- */
+
+.book-card {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    overflow: hidden;
+    transition: transform .18s ease, border-color .18s ease;
+}
+
+.book-card:hover {
+    transform: translateY(-3px);
+    border-color: var(--dlb-accent);
+}
+
+/* A fixed plate, so every cover occupies the same box however odd its own
+ * proportions are. `contain` rather than `cover`: Gutenberg scans vary wildly,
+ * and cropping one to fill the plate slices the title off the artwork. */
+.book-cover {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 2 / 3;
+    background-color: var(--dlb-surface-2);
+    border-bottom: 1px solid var(--dlb-border);
+    flex: none;
+    overflow: hidden;
+}
+
+.book-cover img {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    padding: .5rem;
+}
+
+/* Sits behind the image and shows through when there is no artwork. */
+.book-cover .cover-fallback {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: .4rem;
+    padding: 1.25rem;
+    text-align: center;
+    font-family: var(--dlb-serif);
+    background: linear-gradient(160deg, var(--dlb-accent-soft), transparent 70%);
+}
+
+.book-cover .cover-fallback .t {
+    font-size: 1rem;
+    line-height: 1.3;
+    color: var(--dlb-ink);
+}
+
+.book-cover .cover-fallback .a {
+    font-size: .8rem;
+    color: var(--dlb-ink-muted);
+}
+
+.book-cover.is-missing img { display: none; }
+
+.book-card .card-body {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    padding: 1.1rem;
+}
+
+.book-card .book-title {
+    font-family: var(--dlb-serif);
+    font-size: 1.1rem;
+    line-height: 1.3;
+    margin-bottom: .15rem;
+}
+
+.book-card .book-author {
+    color: var(--dlb-ink-muted);
+    font-size: .85rem;
+    margin-bottom: .6rem;
+}
+
+.book-card .book-blurb {
+    color: var(--dlb-ink-muted);
+    font-size: .9rem;
+    line-height: 1.55;
+    flex: 1 1 auto;
+    margin-bottom: 1rem;
+}
+
+/* On a phone the card turns side-on: a narrow spine beside the text, which
+ * keeps a row readable without a 400px-tall cover above every blurb. */
+@media (max-width: 767.98px) {
+    .book-card { flex-direction: row; }
+
+    .book-cover {
+        width: 104px;
+        aspect-ratio: 2 / 3;
+        border-bottom: 0;
+        border-right: 1px solid var(--dlb-border);
+    }
+
+    .book-cover .cover-fallback { padding: .5rem; }
+    .book-cover .cover-fallback .t { font-size: .8rem; }
+    .book-cover .cover-fallback .a { display: none; }
+}
+
+/* ---------- Steps (How it works) ---------- */
+
+.step-card {
+    height: 100%;
+    text-align: center;
+    padding: 1.75rem 1.25rem;
+}
+
+.step-icon {
+    width: 40px;
+    height: 40px;
+    margin: 0 auto 1rem;
+    color: var(--dlb-accent);
+}
+
+.step-icon svg { width: 100%; height: 100%; display: block; }
+
+.step-card h3 {
+    font-size: 1.05rem;
+    font-family: var(--dlb-sans);
+    font-weight: 700;
+    margin-bottom: .5rem;
+}
+
+.step-card p {
+    color: var(--dlb-ink-muted);
+    font-size: .95rem;
+    line-height: 1.6;
+    margin: 0;
+}
+
+/* ---------- Misc ---------- */
+
+.note {
+    background-color: var(--dlb-surface-2);
+    border: 1px solid var(--dlb-border);
+    border-radius: 10px;
+    padding: .9rem 1rem;
+    font-size: .85rem;
+    color: var(--dlb-ink-muted);
+    line-height: 1.5;
+}
+
+.note .note-head {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: .4rem;
+    color: var(--dlb-ink);
+    font-weight: 600;
+    margin-bottom: .35rem;
+}
+
+.note svg { width: 15px; height: 15px; color: var(--dlb-accent); }
+
+.progress {
+    background-color: var(--dlb-surface-2);
+    border-radius: 999px;
+}
+
+.progress-bar, .progress-bar.bg-success {
+    background-color: var(--dlb-accent) !important;
+}
+
+.alert {
+    border-radius: 10px;
+    border: 1px solid var(--dlb-border);
+}
+
+.alert-success {
+    background-color: var(--dlb-accent-soft);
+    border-color: var(--dlb-accent);
+    color: var(--dlb-ink);
+}
+
+.alert-warning, .alert-danger {
+    background-color: var(--dlb-surface-2);
+    color: var(--dlb-ink);
+}
+
+.alert-danger { border-color: #c0553f; }
+.alert-warning { border-color: #b0833a; }
+
+.badge.bg-warning { background-color: #b0833a !important; color: #fff !important; }
+.badge.bg-secondary { background-color: var(--dlb-ink-muted) !important; }
+
+/* The last row in a stacked list shouldn't draw a rule above the card edge. */
+.last-child-no-border:last-child {
+    border-bottom: 0 !important;
+    margin-bottom: 0 !important;
+    padding-bottom: 0 !important;
+}

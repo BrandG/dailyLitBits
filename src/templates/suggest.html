@@ -1,62 +1,63 @@
+{% set page_title = 'Suggest a Book - DailyLitBits' %}
 <!DOCTYPE html>
-<html>
+<html lang="en">
 
 <head>
-    <title>Suggest a Book - DailyLitBits</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    {% include 'head.html' %}
 </head>
 
-<body class="bg-light">
-    <div class="container mt-5">
+<body>
+
+    {% include 'header.html' %}
+
+    <div class="container">
         <div class="row justify-content-center">
-            <div class="col-md-6">
+            <div class="col-md-7 col-lg-6">
                 <div class="card shadow-sm">
                     <div class="card-body p-4">
-                        <h2 class="mb-3 text-center text-success">Suggest a Book</h2>
-                        <p class="text-muted text-center mb-4">
-                            As a privately funded project, we strictly limit our library to the <strong>Public
-                                Domain</strong> (published before 1929) or titles explicitly donated by authors.<br>
-                            Help us grow the collection!
+                        <h1 class="h3 mb-3 text-center">Suggest a book</h1>
+                        <p class="text-muted text-center mb-4" style="font-size: .9rem;">
+                            As a privately funded project we keep the library to the
+                            <strong>public domain</strong> (published before 1929), or titles
+                            an author has explicitly donated. Help us grow the collection.
                         </p>
 
                         <form action="/suggest" method="post">
                             <div class="mb-3">
-                                <label class="form-label">Book Title *</label>
-                                <input type="text" name="title" class="form-control"
+                                <label for="s-title" class="form-label">Book title *</label>
+                                <input type="text" id="s-title" name="title" class="form-control"
                                     placeholder="e.g. The Count of Monte Cristo" required>
                             </div>
 
                             <div class="mb-3">
-                                <label class="form-label">Author *</label>
-                                <input type="text" name="author" class="form-control" placeholder="e.g. Alexandre Dumas"
-                                    required>
+                                <label for="s-author" class="form-label">Author *</label>
+                                <input type="text" id="s-author" name="author" class="form-control"
+                                    placeholder="e.g. Alexandre Dumas" required>
                             </div>
 
                             <div class="mb-3">
-                                <label class="form-label">Gutenberg Link (Optional)</label>
-                                <input type="url" name="link" class="form-control"
+                                <label for="s-link" class="form-label">Gutenberg link (optional)</label>
+                                <input type="url" id="s-link" name="link" class="form-control"
                                     placeholder="https://www.gutenberg.org/ebooks/1184">
                                 <div class="form-text">If you know the specific version you want.</div>
                             </div>
 
-                            <div class="mb-3">
-                                <label class="form-label">Why should we add this?</label>
-                                <textarea name="comments" class="form-control" rows="2"
+                            <div class="mb-4">
+                                <label for="s-comments" class="form-label">Why should we add this?</label>
+                                <textarea id="s-comments" name="comments" class="form-control" rows="2"
                                     placeholder="It's a classic because..."></textarea>
                             </div>
 
                             <div class="d-grid">
-                                <button type="submit" class="btn btn-success">Submit Suggestion</button>
+                                <button type="submit" class="btn btn-primary">Submit suggestion</button>
                             </div>
                         </form>
-
-                        <div class="mt-4 text-center">
-                            <a href="/" class="text-decoration-none text-muted">Back to Home</a>
-                        </div>
                     </div>
                 </div>
             </div>
         </div>
+
+        {% include 'footer.html' %}
     </div>
 </body>
 

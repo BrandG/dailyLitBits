@@ -1,54 +1,37 @@
+{% set page_title = 'My Dashboard - DailyLitBits' %}
 <!DOCTYPE html>
-<html>
+<html lang="en">
 
 <head>
-    <title>My Dashboard - DailyLitBits</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <style>
-        .progress {
-            height: 25px;
-            font-size: 0.9rem;
-        }
-
-        .card-header {
-            background-color: #2c3e50;
-            color: white;
-        }
-
-        .last-child-no-border:last-child {
-            border-bottom: 0 !important;
-        }
-    </style>
+    {% include 'head.html' %}
 </head>
 
-<body class="bg-light">
+<body>
     {% include 'header.html' %}
 
     <div class="container">
         <div class="row justify-content-center">
-            <div class="col-md-8">
+            <div class="col-lg-8">
 
                 <!-- CARD 1: CURRENTLY READING -->
                 {% if book_title %}
                 <div class="card shadow-sm mb-4">
-                    <div class="card-header">
-                        <h5 class="mb-0">Currently Reading</h5>
-                    </div>
+                    <div class="card-header">Currently reading</div>
                     <div class="card-body">
-                        <h3>{{ book_title }}</h3>
+                        <h2 class="h4 mb-1">{{ book_title }}</h2>
                         <p class="text-muted">by {{ book_author }}</p>
 
                         {# The label used to sit inside the filled portion, so early in a
                            book it was clipped to a few letters - "Par" at 3% of 165 parts.
                            It lives under the bar now, where it reads at any width. #}
-                        <div class="progress mb-2">
-                            <div class="progress-bar bg-success" role="progressbar"
+                        <div class="progress mb-2" style="height: 10px;">
+                            <div class="progress-bar" role="progressbar"
                                 style="width: {{ percent }}%;" aria-label="Reading progress"
                                 aria-valuenow="{{ percent }}" aria-valuemin="0" aria-valuemax="100">
                             </div>
                         </div>
 
-                        <div class="d-flex justify-content-between text-muted small">
+                        <div class="d-flex justify-content-between text-muted small flex-wrap gap-2">
                             <span>Started: {{ start_date }}</span>
                             <span><strong>Part {{ current }} of {{ total }}</strong>
                                 &middot; {{ percent }}% complete</span>
@@ -57,10 +40,10 @@
                 </div>
                 {% else %}
                 <div class="card shadow-sm mb-4">
-                    <div class="card-body text-center py-4">
-                        <h5 class="mb-2">Nothing arriving right now</h5>
+                    <div class="card-body text-center py-5">
+                        <h2 class="h5 mb-2">Nothing arriving right now</h2>
                         <p class="text-muted mb-3">Pick something from the library and it starts tomorrow.</p>
-                        <a href="/library" class="btn btn-success btn-sm px-4">Browse the library</a>
+                        <a href="/library" class="btn btn-primary btn-sm">Browse the library</a>
                     </div>
                 </div>
                 {% endif %}
@@ -68,9 +51,7 @@
                 <!-- CARD 1.5: QUEUED AND PAUSED BOOKS -->
                 {% if other_books %}
                 <div class="card shadow-sm mb-4">
-                    <div class="card-header">
-                        <h5 class="mb-0">Your Other Books</h5>
-                    </div>
+                    <div class="card-header">Your other books</div>
                     <div class="card-body">
                         <p class="text-muted small mb-3">
                             Starting or resuming one of these moves your current book to the
@@ -78,7 +59,7 @@
                         </p>
                         {% for book in other_books %}
                         <div
-                            class="d-flex justify-content-between align-items-center mb-3 pb-3 border-bottom last-child-no-border">
+                            class="d-flex justify-content-between align-items-center gap-3 mb-3 pb-3 border-bottom last-child-no-border">
                             <div>
                                 <strong class="d-block">{{ book.title }}</strong>
                                 <span class="text-muted small">by {{ book.author }}</span>
@@ -92,11 +73,9 @@
                             </div>
                             <div>
                                 <a href="/switch_book?token={{ token }}&new_book_id={{ book.book_id }}"
-                                    class="btn btn-sm {{ 'btn-success' if book.status == 'paused' else 'btn-outline-primary' }}">
-                                    {{ 'Resume' if book.status == 'paused' else 'Start Reading' }}
+                                    class="btn btn-sm {{ 'btn-primary' if book.status == 'paused' else 'btn-outline-primary' }}">
+                                    {{ 'Resume' if book.status == 'paused' else 'Start reading' }}
                                 </a>
-                                <!-- Bonus: Remove button - would need a new route/form -->
-                                <!-- <button class="btn btn-sm btn-outline-danger ms-2">Remove</button> -->
                             </div>
                         </div>
                         {% endfor %}
@@ -107,22 +86,21 @@
                 <!-- CARD 3: SETTINGS -->
                 {% if sub_id %}
                 <div class="card shadow-sm mb-5">
+                    <div class="card-header">Settings</div>
                     <div class="card-body">
-                        <h5 class="card-title mb-4">Settings</h5>
                         <p class="text-muted small mb-4">
                             Changing how much arrives each day keeps your place &mdash; it only
                             changes how many parts the next email carries.
                         </p>
 
-                        <!-- NEW: DELIVERY PREFERENCES FORM -->
-                        <form action="/update_preferences" method="post" class="mb-4 pb-3 border-bottom">
+                        <form action="/update_preferences" method="post" class="mb-4 pb-4 border-bottom">
                             <input type="hidden" name="token" value="{{ token }}">
                             <input type="hidden" name="sub_id" value="{{ sub_id }}">
 
                             <div class="row g-3">
                                 <div class="col-md-4">
-                                    <label class="form-label small fw-bold text-muted">Time Zone</label>
-                                    <select name="timezone" class="form-select form-select-sm">
+                                    <label for="pref-tz" class="form-label small">Time zone</label>
+                                    <select id="pref-tz" name="timezone" class="form-select form-select-sm">
                                         <option value="UTC" {% if user_tz=='UTC' %}selected{% endif %}>UTC</option>
                                         <option value="US/Eastern" {% if user_tz=='US/Eastern' %}selected{% endif %}>
                                             US/Eastern</option>
@@ -144,8 +122,8 @@
                                 </div>
 
                                 <div class="col-md-3">
-                                    <label class="form-label small fw-bold text-muted">Delivery Hour</label>
-                                    <select name="delivery_hour" class="form-select form-select-sm">
+                                    <label for="pref-hour" class="form-label small">Delivery hour</label>
+                                    <select id="pref-hour" name="delivery_hour" class="form-select form-select-sm">
                                         {% for h in range(0, 24) %}
                                         <option value="{{ h }}" {% if delivery_hour==h %}selected{% endif %}>
                                             {{ h }}:00
@@ -155,8 +133,8 @@
                                 </div>
 
                                 <div class="col-md-3">
-                                    <label class="form-label small fw-bold text-muted">Each Day</label>
-                                    <select name="chunks_per_day" class="form-select form-select-sm">
+                                    <label for="pref-chunks" class="form-label small">Each day</label>
+                                    <select id="pref-chunks" name="chunks_per_day" class="form-select form-select-sm">
                                         {% for n in [1, 2, 3, 4, 6] %}
                                         <option value="{{ n }}" {% if chunks_per_day==n %}selected{% endif %}>
                                             {{ n }} part{{ '' if n == 1 else 's' }} (~{{ n * 325 }} words)
@@ -172,25 +150,25 @@
                         </form>
 
                         <!-- VACATION MODE TOGGLE -->
-                        <div class="d-flex justify-content-between align-items-center border-bottom pb-3 mb-3">
+                        <div class="d-flex justify-content-between align-items-center gap-3 border-bottom pb-3 mb-3">
                             <div>
-                                <strong>Vacation Mode</strong>
+                                <strong>Vacation mode</strong>
                                 <p class="text-muted small mb-0">Pause daily emails temporarily.</p>
                             </div>
                             <form action="/toggle_pause" method="post">
                                 <input type="hidden" name="token" value="{{ token }}">
                                 <input type="hidden" name="sub_id" value="{{ sub_id }}">
                                 {% if status == 'active' %}
-                                <button type="submit" class="btn btn-outline-secondary btn-sm">Pause Emails</button>
+                                <button type="submit" class="btn btn-quiet btn-sm">Pause emails</button>
                                 {% else %}
-                                <button type="submit" class="btn btn-success btn-sm">Resume Emails</button>
+                                <button type="submit" class="btn btn-primary btn-sm">Resume emails</button>
                                 {% endif %}
                             </form>
                         </div>
 
                         <!-- STATUS ALERT -->
                         <div class="alert {{ 'alert-success' if status == 'active' else 'alert-warning' }} mb-0">
-                            Current Status: <strong>{{ status|capitalize }}</strong>
+                            Current status: <strong>{{ status|capitalize }}</strong>
                         </div>
 
                     </div>
@@ -199,6 +177,8 @@
 
             </div>
         </div>
+
+        {% include 'footer.html' %}
     </div>
 </body>
 

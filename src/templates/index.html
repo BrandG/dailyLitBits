@@ -1,39 +1,25 @@
+{% set page_title = 'DailyLitBits - Slow Reading' %}
 <!DOCTYPE html>
 <html lang="en">
 
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>DailyLitBits - Slow Reading</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <style>
-        body {
-            /* Subtle texture or color for better reading experience */
-            background-color: #f8f9fa;
-        }
-
-        .hero-text {
-            font-family: Georgia, 'Times New Roman', serif;
-        }
-    </style>
+    {% include 'head.html' %}
 </head>
 
-<body class="bg-light">
+<body>
 
     {% include 'header.html' %}
 
     <div class="container">
         <div class="row justify-content-center">
-            <div class="col-md-6 col-lg-5">
+            <div class="col-md-7 col-lg-5">
 
-                <div class="text-center mb-5 hero-text">
-                    <h2 class="text-dark mb-2">Read the classics.</h2>
-                    <p class="lead text-muted">
-                        One bite at a time. Delivered daily.
-                    </p>
+                <div class="hero">
+                    <h1>Read the classics.</h1>
+                    <p>One bite at a time, delivered every morning.</p>
                 </div>
 
-                <div class="card shadow-sm border-0">
+                <div class="card shadow-sm">
                     <div class="card-body p-4">
 
                         {% if error_message %}
@@ -50,13 +36,13 @@
 
                         <form action="/signup" method="post">
                             <div class="mb-3">
-                                <label for="email" class="form-label fw-bold">Email Address</label>
+                                <label for="email" class="form-label">Email address</label>
                                 <input type="email" class="form-control" id="email" name="email"
                                     placeholder="you@example.com" required>
                             </div>
 
                             <div class="mb-4">
-                                <label for="book_id" class="form-label fw-bold">Choose a Book</label>
+                                <label for="book_id" class="form-label">Choose a book</label>
                                 <select class="form-select" id="book_id" name="book_id">
                                     {% for book in books %}
                                     <option value="{{ book.book_id }}">
@@ -64,41 +50,46 @@
                                     </option>
                                     {% endfor %}
                                 </select>
+                                <div class="form-text">
+                                    <a href="/library">See all the covers in the library</a>
+                                </div>
                             </div>
 
                             <input type="hidden" id="timezone" name="timezone" value="UTC">
 
                             <div class="d-grid">
-                                <button type="submit" class="btn btn-dark btn-lg">Start Reading</button>
+                                <button type="submit" class="btn btn-primary btn-lg">Start reading</button>
                             </div>
                         </form>
 
-			<div class="mt-4 p-3 bg-light rounded border" style="font-size: 0.85rem; color: #555;">
-                            <div class="d-flex align-items-center justify-content-center gap-2 mb-1">
-                                <span>🔒</span>
-                                <strong style="color: #2c3e50;">Our Privacy Promise</strong>
+                        <div class="note mt-4">
+                            <div class="note-head">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                                    stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                    <rect x="3" y="11" width="18" height="11" rx="2"></rect>
+                                    <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+                                </svg>
+                                Our privacy promise
                             </div>
-                            <p class="m-0 text-center" style="line-height: 1.4;">
+                            <p class="m-0 text-center">
                                 We will <strong>never</strong> sell your email. Data is encrypted.
                                 <br>
-                                <a href="/privacy" class="text-decoration-none text-success">Read our full Privacy Policy</a>.
+                                <a href="/privacy">Read our full privacy policy</a>.
                             </p>
                         </div>
 
-                        <div class="mt-3 text-center" style="font-size: 0.9rem;">
+                        <div class="mt-3 text-center" style="font-size: .9rem;">
                             <span class="text-muted">Don't see your favorite book?</span><br>
-                            <a href="/suggest" class="text-decoration-none fw-bold text-success">Suggest a Title</a>
+                            <a href="/suggest" class="fw-bold">Suggest a title</a>
                         </div>
 
                     </div>
                 </div>
 
-                <div class="text-center mt-5 text-muted small">
-                    &copy; {{ now_year }} DailyLitBits
-                </div>
-
             </div>
         </div>
+
+        {% include 'footer.html' %}
     </div>
 
     <script>
@@ -112,7 +103,7 @@
             console.log("Timezone detection failed, defaulting to UTC");
         }
 
-        // 2. Pre-select Book from URL (e.g. dailybits.com/?book=pg11)
+        // 2. Pre-select Book from URL (e.g. dailylitbits.com/?book=pg11)
         const urlParams = new URLSearchParams(window.location.search);
         const preSelectedBook = urlParams.get('book');
 
@@ -125,9 +116,11 @@
                 // Scroll to form so they see it
                 document.querySelector('.card').scrollIntoView({ behavior: 'smooth', block: 'center' });
 
-                // Optional: Highlight the box momentarily
-                selectBox.style.border = "2px solid #198754"; // Bootstrap Success Green
-                selectBox.style.backgroundColor = "#e8f5e9";
+                // Highlight the box momentarily, in the theme's own accent.
+                const accent = getComputedStyle(document.documentElement)
+                    .getPropertyValue('--dlb-accent').trim();
+                selectBox.style.borderColor = accent;
+                selectBox.style.boxShadow = '0 0 0 .2rem var(--dlb-accent-soft)';
             }
         }
     </script>

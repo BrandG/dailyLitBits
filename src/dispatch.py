@@ -42,6 +42,35 @@ def parse_ts(value):
     return parsed if parsed.tzinfo else pytz.utc.localize(parsed)
 
 
+# Shared <head> for every email we send: the dark palette, and the two metas
+# that tell a client we have one. Kept as a plain string so the braces below
+# are CSS braces, not f-string placeholders.
+EMAIL_HEAD = """
+    <head>
+        <meta charset="utf-8">
+        <meta name="color-scheme" content="light dark">
+        <meta name="supported-color-schemes" content="light dark">
+        <style>
+          @media (prefers-color-scheme: dark) {
+            .dlb-body { background-color: #121311 !important; color: #ece7dd !important; }
+            .dlb-title { color: #ece7dd !important; }
+            .dlb-rule { border-color: #2f3329 !important; }
+            .dlb-recap { background-color: #1a1c19 !important; color: #b7b0a4 !important;
+                         border-left-color: #6cc295 !important; }
+            .dlb-recap strong { color: #ece7dd !important; }
+            .dlb-track, .dlb-empty { background-color: #2f3329 !important; }
+            .dlb-fill { background-color: #6cc295 !important; }
+            .dlb-button { background-color: #6cc295 !important; color: #0d1711 !important; }
+            .dlb-muted, .dlb-muted a { color: #a39b8d !important; }
+            .dlb-accent, .dlb-accent a { color: #6cc295 !important; }
+            .dlb-panel, .dlb-panel td, .dlb-card {
+                background-color: #1a1c19 !important; border-color: #2f3329 !important; }
+          }
+        </style>
+    </head>
+"""
+
+
 def format_email_html(title, first_seq, last_seq, total_chunks, content,
                       unsub_token, next_token, dashboard_token, recap=None):
     html_content = content.replace('\n\n', '</p><p>').replace('\n', '<br>')
@@ -65,39 +94,40 @@ def format_email_html(title, first_seq, last_seq, total_chunks, content,
     recap_html = ""
     if recap and first_seq > 1:
         recap_html = f"""
-        <div style="background-color: #f8f9fa; border-left: 4px solid #6c757d; padding: 15px; margin-bottom: 25px; color: #555; font-style: italic; font-size: 14px;">
-            <strong style="color: #333; font-style: normal; display: block; margin-bottom: 5px;">Previously:</strong>
+        <div class="dlb-recap" style="background-color: #f6f2ea; border-left: 4px solid #1f6b4f; padding: 15px; margin-bottom: 25px; color: #5b534a; font-style: italic; font-size: 14px;">
+            <strong style="color: #23201c; font-style: normal; display: block; margin-bottom: 5px;">Previously:</strong>
             {recap}
         </div>
         """
 
     binge_button_html = f"""
     <div style="text-align: center; margin-top: 30px;">
-        <a href="{binge_link}" style="background-color: #2c3e50; color: #ffffff; padding: 10px 20px; text-decoration: none; border-radius: 5px; font-size: 14px; font-weight: bold;">
+        <a href="{binge_link}" class="dlb-button" style="background-color: #1f6b4f; color: #ffffff; padding: 11px 22px; text-decoration: none; border-radius: 8px; font-size: 14px; font-weight: bold;">
             Send the next part now
         </a>
-        <p style="font-size: 11px; color: #999; margin-top: 5px;">(Or wait for tomorrow's delivery)</p>
+        <p class="dlb-muted" style="font-size: 11px; color: #8d857a; margin-top: 8px;">(Or wait for tomorrow's delivery)</p>
     </div>
     """
 
     template = f"""
     <html>
-    <body style="font-family: Georgia, 'Times New Roman', serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+    {EMAIL_HEAD}
+    <body class="dlb-body" style="font-family: Georgia, 'Times New Roman', serif; line-height: 1.6; background-color: #ffffff; color: #23201c; max-width: 600px; margin: 0 auto; padding: 20px;">
         
-        <div style="border-bottom: 2px solid #eee; padding-bottom: 15px; margin-bottom: 20px;">
-            <h2 style="color: #2c3e50; margin: 0 0 10px 0;">{title}</h2>
+        <div class="dlb-rule" style="border-bottom: 1px solid #e4dcd0; padding-bottom: 15px; margin-bottom: 20px;">
+            <h2 class="dlb-title" style="color: #23201c; margin: 0 0 10px 0;">{title}</h2>
             
             <table width="100%" cellpadding="0" cellspacing="0" style="margin-top: 10px;">
                 <tr>
                     <td width="85%" style="vertical-align: middle;">
-                        <table width="100%" cellpadding="0" cellspacing="0" height="8" style="height: 8px; background-color: #eeeeee; border-radius: 4px; overflow: hidden;">
+                        <table width="100%" cellpadding="0" cellspacing="0" height="8" class="dlb-track" style="height: 8px; background-color: #ece5d9; border-radius: 4px; overflow: hidden;">
                             <tr>
-                                <td width="{green_width}%" height="8" style="background-color: #28a745; height: 8px; line-height: 0; font-size: 0;">&nbsp;</td>
-                                <td width="{gray_width}%" height="8" style="background-color: #eeeeee; height: 8px; line-height: 0; font-size: 0;">&nbsp;</td>
+                                <td width="{green_width}%" height="8" class="dlb-fill" style="background-color: #1f6b4f; height: 8px; line-height: 0; font-size: 0;">&nbsp;</td>
+                                <td width="{gray_width}%" height="8" class="dlb-empty" style="background-color: #ece5d9; height: 8px; line-height: 0; font-size: 0;">&nbsp;</td>
                             </tr>
                         </table>
                     </td>
-                    <td width="15%" style="text-align: right; font-family: sans-serif; font-size: 12px; color: #999; white-space: nowrap; padding-left: 10px;">
+                    <td width="15%" class="dlb-muted" style="text-align: right; font-family: sans-serif; font-size: 12px; color: #8d857a; white-space: nowrap; padding-left: 10px;">
                         {part_label} of {total_chunks}
                     </td>
                 </tr>
@@ -112,12 +142,12 @@ def format_email_html(title, first_seq, last_seq, total_chunks, content,
         
         {binge_button_html}
         
-        <hr style="border: 0; border-top: 1px solid #eee; margin-top: 30px;">
+        <hr class="dlb-rule" style="border: 0; border-top: 1px solid #e4dcd0; margin-top: 30px;">
         
-        <p style="font-size: 12px; color: #999; text-align: center; font-family: sans-serif;">
-            <a href="{dashboard_link}" style="color: #2c3e50; font-weight: bold; text-decoration: none;">Manage Subscription</a> 
+        <p class="dlb-muted" style="font-size: 12px; color: #8d857a; text-align: center; font-family: sans-serif;">
+            <a href="{dashboard_link}" class="dlb-accent" style="color: #1f6b4f; font-weight: bold; text-decoration: none;">Manage Subscription</a> 
             &nbsp;|&nbsp; 
-            <a href="{unsub_link}" style="color: #999;">Unsubscribe</a>
+            <a href="{unsub_link}" style="color: #8d857a;">Unsubscribe</a>
         </p>
     </body>
     </html>
@@ -138,11 +168,11 @@ def format_victory_email(book_title, days_taken, word_count, suggestions, dashbo
         author = book.get('author', 'Unknown Author')
 
         suggestions_html += f"""
-        <div style="background: #fff; border: 1px solid #ddd; padding: 15px; margin-bottom: 15px; border-radius: 5px; text-align: left;">
-            <strong style="font-size: 16px; color: #2c3e50;">{book['title']}</strong>
-            <div style="font-size: 12px; color: #777; margin-bottom: 8px;">by {author}</div>
+        <div class="dlb-card" style="background: #ffffff; border: 1px solid #e4dcd0; padding: 15px; margin-bottom: 15px; border-radius: 8px; text-align: left;">
+            <strong class="dlb-title" style="font-size: 16px; color: #23201c;">{book['title']}</strong>
+            <div class="dlb-muted" style="font-size: 12px; color: #8d857a; margin-bottom: 8px;">by {author}</div>
             <div>
-                <a href="{link}" style="color: #28a745; text-decoration: none; font-weight: bold; font-size: 14px;">
+                <a href="{link}" class="dlb-accent" style="color: #1f6b4f; text-decoration: none; font-weight: bold; font-size: 14px;">
                     Start Reading &#8594;
                 </a>
             </div>
@@ -156,34 +186,35 @@ def format_victory_email(book_title, days_taken, word_count, suggestions, dashbo
 
     template = f"""
     <html>
-    <body style="font-family: sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; text-align: center;">
-        <h1 style="color: #28a745; margin-bottom: 10px;">Congratulations!</h1>
-        <h2 style="color: #555; font-weight: normal; margin-top: 0;">You have finished<br><strong>{book_title}</strong></h2>
+    {EMAIL_HEAD}
+    <body class="dlb-body" style="font-family: Georgia, 'Times New Roman', serif; line-height: 1.6; background-color: #ffffff; color: #23201c; max-width: 600px; margin: 0 auto; padding: 20px; text-align: center;">
+        <h1 class="dlb-accent" style="color: #1f6b4f; margin-bottom: 10px;">Congratulations!</h1>
+        <h2 class="dlb-title" style="color: #23201c; font-weight: normal; margin-top: 0;">You have finished<br><strong>{book_title}</strong></h2>
 
         {message_html}
 
-        <table width="100%" cellpadding="0" cellspacing="0" style="background-color: #f8f9fa; border: 1px solid #ddd; border-radius: 10px; margin: 30px 0; border-collapse: separate;">
+        <table width="100%" cellpadding="0" cellspacing="0" class="dlb-panel" style="background-color: #f6f2ea; border: 1px solid #e4dcd0; border-radius: 10px; margin: 30px 0; border-collapse: separate;">
             <tr>
-                <td width="50%" style="padding: 20px; text-align: center; border-right: 1px solid #ddd; vertical-align: middle;">
-                    <p style="font-size: 12px; margin: 0; color: #999; text-transform: uppercase; letter-spacing: 1px;">Time Taken</p>
-                    <p style="font-size: 28px; font-weight: bold; color: #2c3e50; margin: 5px 0 0 0;">{days_taken} {day_label}</p>
+                <td width="50%" class="dlb-panel" style="padding: 20px; text-align: center; border-right: 1px solid #e4dcd0; vertical-align: middle;">
+                    <p class="dlb-muted" style="font-size: 12px; margin: 0; color: #8d857a; text-transform: uppercase; letter-spacing: 1px;">Time Taken</p>
+                    <p class="dlb-title" style="font-size: 28px; font-weight: bold; color: #23201c; margin: 5px 0 0 0;">{days_taken} {day_label}</p>
                 </td>
-                <td width="50%" style="padding: 20px; text-align: center; vertical-align: middle;">
-                    <p style="font-size: 12px; margin: 0; color: #999; text-transform: uppercase; letter-spacing: 1px;">Words Read</p>
-                    <p style="font-size: 28px; font-weight: bold; color: #2c3e50; margin: 5px 0 0 0;">{word_count:,}</p>
+                <td width="50%" class="dlb-panel" style="padding: 20px; text-align: center; vertical-align: middle;">
+                    <p class="dlb-muted" style="font-size: 12px; margin: 0; color: #8d857a; text-transform: uppercase; letter-spacing: 1px;">Words Read</p>
+                    <p class="dlb-title" style="font-size: 28px; font-weight: bold; color: #23201c; margin: 5px 0 0 0;">{word_count:,}</p>
                 </td>
             </tr>
         </table>
 
-        <h3 style="color: #2c3e50; margin-top: 40px; border-bottom: 2px solid #eee; padding-bottom: 10px;">Ready for your next adventure?</h3>
-        <p style="color: #666; font-size: 14px; margin-bottom: 20px;">Click a book below to start receiving it tomorrow.</p>
+        <h3 class="dlb-title dlb-rule" style="color: #23201c; margin-top: 40px; border-bottom: 1px solid #e4dcd0; padding-bottom: 10px;">Ready for your next adventure?</h3>
+        <p class="dlb-muted" style="color: #6b625a; font-size: 14px; margin-bottom: 20px;">Click a book below to start receiving it tomorrow.</p>
 
-        <div style="background-color: #f4f4f4; padding: 20px; border-radius: 8px;">
+        <div class="dlb-panel" style="background-color: #f6f2ea; padding: 20px; border-radius: 8px;">
             {suggestions_html}
         </div>
 
-        <p style="margin-top: 30px; font-size: 12px; color: #999;">
-            <a href="{base_url}" style="color: #999;">Browse Full Library</a>
+        <p class="dlb-muted" style="margin-top: 30px; font-size: 12px; color: #8d857a;">
+            <a href="{base_url}" style="color: #8d857a;">Browse Full Library</a>
         </p>
     </body>
     </html>

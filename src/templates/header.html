@@ -1,15 +1,14 @@
-    <nav class="navbar navbar-expand-lg navbar-light bg-white shadow-sm mb-5">
-        <div class="container">
-            <a class="navbar-brand fw-bold text-success fs-3" href="/">DailyLitBits</a>
+<nav class="site-nav">
+    <div class="container d-flex align-items-center justify-content-between gap-3 flex-wrap">
+        <a class="brand" href="/">DailyLitBits</a>
 
-            <div class="ms-auto">
-                <a href="/intro" class="btn btn-link text-secondary text-decoration-none me-2">How it Works</a>
-                <a href="/library" class="btn btn-link text-success text-decoration-none me-2"
-                    style="font-weight: 500;">Browse Library</a>
-                {# On the dashboard we already have a token, so don't offer a way in. #}
-                {% if not token %}
-                <a href="/login" class="btn btn-outline-success btn-sm px-4">My Dashboard</a>
-                {% endif %}
-            </div>
+        <div class="d-flex align-items-center gap-3">
+            <a href="/intro" class="nav-link-quiet">How it works</a>
+            <a href="/library" class="nav-link-quiet">Library</a>
+            {# On the dashboard we already have a token, so don't offer a way in. #}
+            {% if not token %}
+            <a href="/login" class="btn btn-outline-primary btn-sm">My dashboard</a>
+            {% endif %}
         </div>
-    </nav>
+    </div>
+</nav>
