@@ -65,7 +65,9 @@
 1952
 829
 120
-3206
+# 3206 removed 2026-10-28: 'Moby Multiple Language Lists of Common Words'
+# is a vocabulary dataset, not a book. The acquisition filter now rejects
+# it on the title phrase 'lists of common words'.
 17135
 1023
 1727
@@ -98,3 +100,10 @@
 135
 219
 161
+2680
+35
+158
+132
+36
+1228
+67098

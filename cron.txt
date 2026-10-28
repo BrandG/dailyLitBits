@@ -24,3 +24,4 @@
 0 * * * * docker exec dailylitbits python dispatch.py >> /var/log/dailylitbits.log 2>&1
 0 20 * * * docker exec dailylitbits python summarize.py >> /var/log/dailylitbits_ai.log 2>&1
 0 2 * * * /usr/bin/python3 /root/dailyLitBits/src/backup.py >> /var/log/dailylitbits_backup.log 2>&1
+0 4 * * * docker exec dailylitbits python acquire.py >> /var/log/dailylitbits_acquire.log 2>&1

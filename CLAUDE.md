@@ -238,6 +238,183 @@ Measured 2026-10-25 on `gemini-3.5-flash-lite`, 41 chained calls on pg11:
 `book_list.txt` that projects to roughly 28,000 calls, about 7 hours
 sequential and single-digit dollars.
 
+### Daily Acquisition (`src/acquire.py`, `src/adjudicator.py`)
+
+One book a day, taken from Project Gutenberg's own popularity ranking. The job
+walks the ranking from the top, skips everything already held or already
+judged, ingests the first candidate that survives two filters, and stops.
+
+```bash
+# What the job would do, without downloading or recording anything.
+# Still costs the adjudicator calls (fractions of a cent).
+docker exec dailylitbits python acquire.py --dry-run --verbose
+
+# One book, recaps and all. This is what cron runs.
+docker exec dailylitbits python acquire.py
+
+# What has been decided so far. No network, no cost.
+docker exec dailylitbits python acquire.py --report
+
+# Catch up by several books at once, or walk deeper into the ranking.
+docker exec dailylitbits python acquire.py --count 5 --max-pages 20
+```
+
+**Stage one is deterministic and free**, and it settles most candidates: media
+type, copyright flag, language, the presence of a plain-text file,
+reference-work keywords in the title or in the catalogue's own subject
+headings, periodical issue markers, and an exact match on the normalised
+title. Rank 6 on the live ranking is a dictionary and rank 13 is a Shakespeare
+omnibus, so this stage pays for itself immediately.
+
+Two things the keyword list deliberately does **not** contain: `number` (the
+issue-number regex already requires digits, and *The Number of the Beast* is a
+novel) and `atlas` (*Atlas Shrugged*). A false reject is silent and costs a
+book, so `test_acquire.py` carries a standing list of real titles that must
+keep passing.
+
+**Stage two is one Jev call**, and only for what stage one genuinely cannot
+settle - a title that might be the same work under another name, a
+translation, an omnibus wearing a singular title. See the adjudicator notes
+below.
+
+Every decision, including every rejection, is written to the `acquisitions`
+table. That is what keeps day two cheap: the ranking barely moves, so a
+candidate judged once is never paid for again. `failed` is the one decision
+that is retried, because it means a transient download problem rather than a
+verdict.
+
+**Fail closed, and note which way closed points.** Skipping a good book costs
+nothing - there are 79,000 more and another run tomorrow. Admitting a
+dictionary pollutes a library people read for pleasure. So every failure path
+(no key, timeout, spend cap, malformed answer, low confidence) takes no book.
+With no `JEV_API_KEY` configured the job acquires **nothing**; it does not fall
+back to accepting everything.
+
+#### The adjudicator (`src/adjudicator.py`)
+
+Jev is TypeSafe AI's non-generative decision model: it takes application state
+and typed questions and returns a choice with a calibrated probability. That
+is a better fit here than a chat model, because "is this the same work?" wants
+a number to threshold on rather than prose to parse. The same key and SDK are
+used by the sibling Ricky project.
+
+Calibration facts, measured against the live API on 2026-10-27. A
+default-guessing implementation gets all of these wrong:
+
+- Questions take `instructions`, not `prompt`. `Choice.criteria` is a dict of
+  label to meaning; `Score.criteria` is a flat list of labels.
+- **The conviction scale is question-dependent.** On this question it measured
+  1.04-2.44 (median 2.01). On Ricky's much harder question it measured
+  0.39-1.74 (median 0.88), so a threshold borrowed from there - or the obvious
+  `min_conviction=2` - would reject nearly everything. The gate here is 1.4,
+  calibrated on this question's own distribution.
+- **Not deterministic.** Same state, repeated: the choice is stable but the
+  confidence moves. Here that only matters for a candidate sitting exactly on
+  a gate, where the two outcomes are "take it today" and "take it tomorrow".
+- Cost is negligible: 742 input tokens median, about three thousandths of a
+  cent per call.
+
+**Validated before it was trusted**, because a clean sweep on known-answer
+cases proves nothing on its own:
+
+| check | result |
+|---|---|
+| 16 known-answer cases (editions, translations, same-author-different-book, dictionaries, periodicals) | 16/16 |
+| C1 empty `already_held` - every DUPLICATE must flip to NEW | 5/5 flipped |
+| C2 obscure title, matching holding swapped in underneath it | NEW then DUPLICATE |
+| C3 labels renamed to ALPHA/BETA/GAMMA, same meanings | 5/5 survived |
+| C4 invented nonsense titles | conviction 1.04-1.23, well under the gate |
+
+C1 is the one that matters: without it, "Moby-Dick is a duplicate" is
+indistinguishable from recognising a famous title. The gates were then checked
+against 22 live verdicts and fall in a gap rather than through a cluster -
+everything accepted scored 1.50 and above, everything gated scored 1.36, 1.38,
+1.38. What the probability gate catches in practice is short-story
+collections, where NEW and NOT_SERIAL are both defensible; declining to decide
+those is the right outcome.
+
+#### One a day, and what stops it
+
+The job keeps walking until it actually takes a book. Rejections never end a
+run - that was always true - but two things used to end one for reasons that
+had nothing to do with any book, and both are fixed:
+
+- **A dead catalogue page took the rest of the ranking with it.** The walker
+  followed gutendex's own `next` links, and the link to page N+1 only arrives
+  inside page N, so one timeout ended the walk. It now walks numbered URLs
+  (`?sort=popular&page=N`), so a dead page is stepped over. Rank is derived
+  from the page number, so a skipped page does not shift the ranks below it.
+  Four consecutive dead pages is treated as the catalogue being down, which is
+  a different thing from the ranking being exhausted, and is reported as such.
+- **The 12-page bound stopped the search at ~384 candidates** whether or not a
+  book had been found. The bound is now 60 pages, about 1,900 candidates. On a
+  normal day none of it is walked - the ranking is sorted by popularity and the
+  job stops the moment it has a book, so a typical run reads two pages.
+
+**Persisting means looking further down the ranking, never relaxing a filter.**
+A day with no book is still the right outcome when there is genuinely nothing
+left to take, and the gates and the fail-closed paths are untouched. The
+consequence to accept is that as the library grows, the books get less famous:
+one a day is bought by going deeper.
+
+The bounds that can end a run early, all of them reported by name in the final
+log line, because the one thing a quiet daily job must not do is look the same
+when it is working as when it is broken:
+
+| bound | value | what it means |
+|---|---|---|
+| `MAX_PAGES` | 60 pages | `page_limit` - more ranking below; raise `--max-pages` |
+| `PAGE_FAILURE_LIMIT` | 3 dead pages in a row | `catalogue_unreachable` - gutendex, not us |
+| `SEARCH_BUDGET_S` | 1800s | `search_budget`; excludes ingest and recap time |
+| `MAX_ADJUDICATIONS` | 120 per run | `adjudication_limit`; ~$0.005 at the far end |
+| `ADJ_FAILURE_LIMIT` | 6 errors in a row | `adjudicator_outage` - take nothing on its word |
+| `ERROR_LIMIT` | 8 unexpected errors | `too_many_errors` |
+
+Reaching the end cleanly reports `end_of_catalogue`; a successful run reports
+`took_target`. `catalogue_unreachable` is the one worth noticing, because it
+is the only outcome that says nothing about the books.
+
+**Catalogue pages have their own timeout, and it is large.** Measured
+2026-10-28: page 1 returns in 0.1s, page 5 in **100.9s**, both with perfectly
+good data - the shallow pages are evidently cached and the deep ones computed.
+At the old shared `HTTP_TIMEOUT` of 30s a deep walk would have failed page five
+three times over and declared the catalogue unreachable while it was working
+fine, which would have made the 60-page bound fiction. `CATALOGUE_TIMEOUT` is
+150s with two attempts rather than three: when one attempt can cost two
+minutes, a third is budget spent on the same answer. `HTTP_TIMEOUT` stays at
+30s for book downloads, which are a different kind of request.
+
+So the real governor on a deep walk is `SEARCH_BUDGET_S`, not the page bound.
+At worst-case page latency that is a dozen or so pages; on a normal day, when
+pages come back in a tenth of a second, it is the full 60.
+
+#### Removed by hand
+
+The library was seeded from `src/book_list.txt`, written before this filter
+existed, and one entry was not a book: `pg3206`, 'Moby Multiple Language Lists
+of Common Words', a vocabulary dataset with a documentation header. Removed
+2026-10-28, with no subscriptions pointing at it. Three things went with it -
+the chunks (by cascade), the cover file, and the entry in the seed list, which
+is commented out rather than deleted so a future bulk re-run cannot quietly
+put it back.
+
+The `acquisitions` table carries a `not_serial` row for 3206 with reason
+`removed_by_hand:word_list_from_original_book_list`. That reason string is not
+written by any code path; it exists so the audit trail explains a gap in the
+popularity walk. Belt and braces, as it turns out - stage one rejects the
+title unaided, on the phrase `lists of common words`.
+
+#### Two bugs the first live run found
+
+1. Gutenberg's catalogue leaks **MARC subfield delimiters** into titles: the
+   live ranking served `The silent Baltic : $b or, Detained near Kiel`. That
+   string would have been stored and shown on the website.
+   `clean_catalogue_title()` runs before the title is stored, not only before
+   it is compared.
+2. **Ligatures have no canonical decomposition**, so NFKD left them alone and
+   the punctuation strip turned `Encyclopaedia` into `encyclopdia`, which
+   matched no keyword. Mapped explicitly now.
+
 ## Important Patterns & Conventions
 
 ### Database Dependency Injection
@@ -302,6 +479,15 @@ The `.env` file (not committed to git) contains:
   retires these; `gemini-2.0-flash` was withdrawn and every AI feature
   returned 404 until this was changed. List what the key can see with
   `docker exec dailylitbits python tools/model_list.py`.
+- `JEV_API_KEY`: TypeSafe AI key for the acquisition adjudicator. **Unset is a
+  supported state**: `acquire.py` then takes no book at all rather than taking
+  every book. Shared with the Ricky project, so the two share a daily cap.
+- `JEV_MODEL`: pinned Jev model id (default `jev-1.13.0`). Pinned because this
+  is a judgment layer - a silent upgrade would change what the library admits
+  with nothing appearing to break, and the conviction scale is model-specific.
+- `JEV_DAILY_USD_CAP`: bound on a bug, not a budget (default 0.25). A normal
+  run costs well under a cent, so anything near this cap means something is
+  looping.
 - `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`: Brevo SMTP credentials
 - `FROM_EMAIL`: Sender email address
 
@@ -321,6 +507,12 @@ The application uses system cron (not Docker-based) for scheduled tasks:
 # Daily database backup (at 2 AM). Runs on the host, against the SQLite file
 # through the bind mount - one of the few things that is NOT run via docker exec.
 0 2 * * * /usr/bin/python3 /root/dailyLitBits/src/backup.py
+
+# Daily acquisition (at 4 AM). Takes at most one book, and exits 0 when it
+# takes none - on most days there is nothing new in the top few hundred, and a
+# cron job that cries wolf gets ignored. Deliberately after the backup, so a
+# bad acquisition is always one restore away from being undone.
+0 4 * * * docker exec dailylitbits python acquire.py
 ```
 
 ## Backup and Restore

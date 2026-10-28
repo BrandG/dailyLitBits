@@ -10,7 +10,7 @@
 -- db.init_db() applies this on every connection, so every statement here
 -- must stay idempotent.
 
-PRAGMA user_version = 2;
+PRAGMA user_version = 3;
 
 CREATE TABLE IF NOT EXISTS users (
     id           INTEGER PRIMARY KEY,
@@ -103,3 +103,29 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE INDEX IF NOT EXISTS idx_events_kind ON events(event, occurred_at);
 CREATE INDEX IF NOT EXISTS idx_events_sub  ON events(subscription_id);
+
+-- Every acquisition decision the daily job has made, including the rejections.
+-- Two jobs: it stops the job paying to judge the same candidate twice (the
+-- whole point of walking a ranking that barely moves day to day), and it is
+-- the audit trail for why the library holds what it holds.
+CREATE TABLE IF NOT EXISTS acquisitions (
+    gutenberg_id    INTEGER PRIMARY KEY,
+    title           TEXT,
+    author          TEXT,
+    decision        TEXT    NOT NULL
+                    CHECK (decision IN ('acquired', 'duplicate', 'not_serial',
+                                        'unsuitable', 'failed')),
+    reason          TEXT,
+    -- 'deterministic' decisions were free; 'jev' ones cost a call.
+    stage           TEXT    NOT NULL CHECK (stage IN ('deterministic', 'jev')),
+    popularity_rank INTEGER,
+    downloads       INTEGER,
+    -- Only set for adjudicated decisions. Kept so a threshold change can be
+    -- evaluated against what was actually decided rather than re-run.
+    probability     REAL,
+    conviction      REAL,
+    model           TEXT,
+    decided_at      TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_acq_decision ON acquisitions(decision, decided_at);

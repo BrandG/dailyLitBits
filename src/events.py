@@ -31,6 +31,7 @@ EVENTS = {
     "completed",      # reached the end
     "unsubscribed",   # stopped for good
     "prefs_changed",  # delivery settings edited
+    "acquired",       # the daily job added a book to the library
 }
 
 # Everything `detail` may carry. Reading preferences and book ids only.
@@ -43,6 +44,12 @@ ALLOWED_DETAIL = {
     "to_book",
     "parts",
     "trigger",
+    # Library-side, carried by "acquired". No reader is involved in an
+    # acquisition, so these rows have a null subscription_id and are
+    # aggregate from birth.
+    "chunks",
+    "downloads",
+    "stage",
 }
 
 

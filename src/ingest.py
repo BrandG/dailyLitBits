@@ -393,6 +393,9 @@ def ingest_book(text, title, author, book_id, source_url,
         conn.close()
 
     print(f"Success! '{title}' ingested.")
+    # Returned so an automated caller can tell success from the several
+    # early returns above. Previously everything returned None.
+    return book_id
 
 
 def process_source(source, override_title=None, override_author=None,
@@ -414,11 +417,12 @@ def process_source(source, override_title=None, override_author=None,
         author = override_author if override_author else extract_author(raw_text)
         
         clean_content = clean_text(raw_text)
-        ingest_book(clean_content, title, author, book_id, url,
-                    use_ai=use_ai, with_recaps=with_recaps)
-        
+        return ingest_book(clean_content, title, author, book_id, url,
+                           use_ai=use_ai, with_recaps=with_recaps)
+
     except Exception as e:
         print(f"Error processing '{source}': {e}")
+        return None
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(

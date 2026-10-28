@@ -47,3 +47,16 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 # per chunk; swap to gemini-3.5-flash for better prose. Check what the key can
 # actually see with: docker exec dailylitbits python tools/model_list.py
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
+
+# Jev (TypeSafe AI). Judges library acquisition candidates the deterministic
+# filter cannot settle - see adjudicator.py. Unset is a supported state: the
+# acquisition job then refuses to take any book rather than taking them all.
+#
+# The model id is pinned because this is a judgment layer. A silent upgrade
+# would change what the library admits without anything appearing to break,
+# and the conviction scale in particular is model- and question-specific.
+JEV_API_KEY = os.getenv("JEV_API_KEY")
+JEV_MODEL = os.getenv("JEV_MODEL", "jev-1.13.0")
+# A bound on a bug, not a budget: a run costs fractions of a cent, so anything
+# approaching this cap means something is looping.
+JEV_DAILY_USD_CAP = float(os.getenv("JEV_DAILY_USD_CAP", "0.25"))

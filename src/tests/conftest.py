@@ -34,7 +34,8 @@ def conn():
     connection = db.get_db()
     # events first: it references subscriptions, and rows left behind would
     # leak between tests that assert on the exact contents of the log.
-    for table in ("events", "chunks", "subscriptions", "books", "users", "suggestions"):
+    for table in ("events", "chunks", "subscriptions", "books", "users", "suggestions",
+                  "acquisitions"):
         connection.execute(f"DELETE FROM {table}")
     yield connection
     connection.close()
