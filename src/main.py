@@ -90,6 +90,56 @@ def book_choices(conn):
     ).fetchall()
 
 
+def cover_url_for(book):
+    """The cover downloaded at ingest, else Gutenberg's own, else nothing.
+
+    Returning None rather than a placeholder URL lets the template draw its own
+    title plate, which is one fewer third-party image for a page to depend on.
+    """
+    if book.get("cover_path"):
+        return book["cover_path"]
+
+    clean_id = str(book["book_id"]).replace("pg", "")
+    if clean_id.isdigit():
+        return (f"https://www.gutenberg.org/cache/epub/{clean_id}"
+                f"/pg{clean_id}.cover.medium.jpg")
+    return None
+
+
+def added_label(created_at):
+    """'28 Oct' for a stored timestamp, or '' when it cannot be read.
+
+    A book row always has created_at, but a hand-inserted one may not parse,
+    and a date that cannot be read is no reason to lose the whole section.
+    """
+    try:
+        return datetime.fromisoformat(created_at).strftime("%-d %b")
+    except (TypeError, ValueError):
+        return ""
+
+
+def recent_books(conn, limit=4):
+    """The books most recently added to the library, newest first.
+
+    Ties break on id so the order is stable: the rebuild loaded most of the
+    library within the same few seconds, and an unstable sort there would
+    reshuffle the home page on every request.
+    """
+    rows = conn.execute(
+        """SELECT id AS book_id, title, author, cover_path, created_at
+           FROM books ORDER BY created_at DESC, id DESC LIMIT ?""",
+        (limit,),
+    ).fetchall()
+
+    books = []
+    for row in rows:
+        book = dict(row)
+        book["cover_url"] = cover_url_for(book)
+        book["added"] = added_label(book.get("created_at"))
+        books.append(book)
+    return books
+
+
 # --- EMAILS ---
 
 def send_welcome_email(to_email, book_title, dashboard_link, is_queue=False):
@@ -144,7 +194,7 @@ def send_dashboard_link(to_email, dashboard_link):
 @app.get("/", response_class=HTMLResponse)
 async def read_root(request: Request, conn=Depends(get_db)):
     return templates.TemplateResponse("index.html", {
-        "request": request, "books": book_choices(conn)
+        "request": request, "books": book_choices(conn), "recent": recent_books(conn)
     })
 
 
@@ -159,15 +209,7 @@ async def library(request: Request, conn=Depends(get_db)):
     books = []
     for row in rows:
         book = dict(row)
-        # Prefer the cover we downloaded at ingest; fall back to Gutenberg.
-        if book.get("cover_path"):
-            book["cover_url"] = book["cover_path"]
-        else:
-            clean_id = book["book_id"].replace("pg", "")
-            book["cover_url"] = (
-                f"https://www.gutenberg.org/cache/epub/{clean_id}/pg{clean_id}.cover.medium.jpg"
-                if clean_id.isdigit() else "/static/covers/placeholder.jpg"
-            )
+        book["cover_url"] = cover_url_for(book)
         books.append(book)
 
     return templates.TemplateResponse("library.html", {"request": request, "books": books})
@@ -197,7 +239,7 @@ async def handle_signup(
     book = conn.execute("SELECT id, title FROM books WHERE id = ?", (book_id,)).fetchone()
     if not book:
         return templates.TemplateResponse("index.html", {
-            "request": request, "books": book_choices(conn),
+            "request": request, "books": book_choices(conn), "recent": recent_books(conn),
             "message": "That book is not in the library.",
         })
 
@@ -243,12 +285,12 @@ async def handle_signup(
                           chunks_per_day=chunks_per_day)
     except _AlreadySubscribed as already:
         return templates.TemplateResponse("index.html", {
-            "request": request, "books": book_choices(conn), "message": str(already),
+            "request": request, "books": book_choices(conn), "recent": recent_books(conn), "message": str(already),
         })
     except Exception as exc:
         log(f"[ERROR] Signup failed: {type(exc).__name__}: {exc}")
         return templates.TemplateResponse("index.html", {
-            "request": request, "books": book_choices(conn),
+            "request": request, "books": book_choices(conn), "recent": recent_books(conn),
             "message": "Something went wrong creating your subscription.",
         })
 
@@ -261,7 +303,7 @@ async def handle_signup(
                f"Success! '{book['title']}' starts tomorrow. Check your email for your dashboard link.")
 
     return templates.TemplateResponse("index.html", {
-        "request": request, "books": book_choices(conn), "message": message,
+        "request": request, "books": book_choices(conn), "recent": recent_books(conn), "message": message,
     })
 
 

@@ -366,16 +366,83 @@ a:hover {
 @media (max-width: 767.98px) {
     .book-card { flex-direction: row; }
 
-    .book-cover {
+    /* Scoped to the library card: the same plate is used at full width by the
+       arrivals strip on the home page, which must not turn side-on. */
+    .book-card .book-cover {
         width: 104px;
         aspect-ratio: 2 / 3;
         border-bottom: 0;
         border-right: 1px solid var(--dlb-border);
     }
 
-    .book-cover .cover-fallback { padding: .5rem; }
-    .book-cover .cover-fallback .t { font-size: .8rem; }
-    .book-cover .cover-fallback .a { display: none; }
+    .book-card .book-cover .cover-fallback { padding: .5rem; }
+    .book-card .book-cover .cover-fallback .t { font-size: .8rem; }
+    .book-card .book-cover .cover-fallback .a { display: none; }
+}
+
+/* ---------- New arrivals ---------- */
+
+.arrivals { margin-top: 4rem; }
+
+.arrivals-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 1rem;
+    border-bottom: 1px solid var(--dlb-border);
+    padding-bottom: .6rem;
+    margin-bottom: 1.25rem;
+}
+
+.arrivals-head h2 {
+    font-size: 1.3rem;
+    margin: 0;
+}
+
+.arrivals-head a { font-size: .85rem; white-space: nowrap; }
+
+.arrivals-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 1.25rem;
+}
+
+@media (max-width: 575.98px) {
+    .arrivals-grid { grid-template-columns: repeat(2, 1fr); }
+}
+
+.arrival {
+    display: block;
+    text-decoration: none;
+    color: inherit;
+}
+
+.arrival .book-cover {
+    border: 1px solid var(--dlb-border);
+    border-radius: 8px;
+    margin-bottom: .5rem;
+    transition: transform .18s ease, border-color .18s ease;
+}
+
+.arrival:hover .book-cover,
+.arrival:focus-visible .book-cover {
+    transform: translateY(-3px);
+    border-color: var(--dlb-accent);
+}
+
+.arrival-title {
+    font-family: var(--dlb-serif);
+    font-size: .95rem;
+    line-height: 1.3;
+    color: var(--dlb-ink);
+}
+
+.arrival:hover .arrival-title { color: var(--dlb-accent); }
+
+.arrival-meta {
+    font-size: .75rem;
+    color: var(--dlb-ink-muted);
+    margin-top: .15rem;
 }
 
 /* ---------- Steps (How it works) ---------- */

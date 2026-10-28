@@ -89,6 +89,40 @@
             </div>
         </div>
 
+        {% if recent %}
+        <div class="row justify-content-center">
+            <div class="col-lg-9">
+                <section class="arrivals">
+                    <div class="arrivals-head">
+                        <h2>New arrivals</h2>
+                        <a href="/library">Browse all &rarr;</a>
+                    </div>
+
+                    <div class="arrivals-grid">
+                        {% for book in recent %}
+                        <a class="arrival" href="/?book={{ book.book_id }}">
+                            <div class="book-cover">
+                                <div class="cover-fallback" aria-hidden="true">
+                                    <span class="t">{{ book.title }}</span>
+                                    <span class="a">{{ book.author }}</span>
+                                </div>
+                                {% if book.cover_url %}
+                                <img src="{{ book.cover_url }}" alt="Cover of {{ book.title }}" loading="lazy"
+                                    onerror="this.closest('.book-cover').classList.add('is-missing')">
+                                {% endif %}
+                            </div>
+                            <div class="arrival-title">{{ book.title }}</div>
+                            <div class="arrival-meta">
+                                {{ book.author }}{% if book.added %} &middot; added {{ book.added }}{% endif %}
+                            </div>
+                        </a>
+                        {% endfor %}
+                    </div>
+                </section>
+            </div>
+        </div>
+        {% endif %}
+
         {% include 'footer.html' %}
     </div>
 

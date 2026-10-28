@@ -1,6 +1,7 @@
 """The HTTP surface: signing up, the dashboard, the email links, admin."""
 import re
 
+import main
 import security
 from user_manager import UserManager
 
@@ -335,3 +336,47 @@ def test_progress_label_is_not_inside_the_coloured_fill(client, conn, reader):
     assert fill is not None
     assert fill.group(1).strip() == ""
     assert "Part 1 of 10" in page
+
+
+# --- new arrivals ---
+
+def test_home_shows_the_newest_books_first(client, conn, book):
+    """The strip is ordered by when a book entered the library, not by title."""
+    conn.executemany(
+        """INSERT INTO books (id, title, author, total_chunks, total_words, created_at)
+           VALUES (?, ?, 'An Author', 1, 100, ?)""",
+        [("pgold", "An Older Book", "2026-01-02T00:00:00+00:00"),
+         ("pgnew", "The Newest Book", "2026-05-05T00:00:00+00:00")],
+    )
+
+    page = client.get("/").text
+
+    assert "New arrivals" in page
+    # Scoped to the strip: the signup dropdown below it lists every book by
+    # title, so searching the whole page would compare the wrong two spots.
+    strip = page.split('class="arrivals-grid"', 1)[1]
+    assert strip.index("The Newest Book") < strip.index("An Older Book")
+
+
+def test_home_still_renders_when_a_date_cannot_be_read(client, conn, book):
+    """A date we cannot parse costs that book its label, not the whole page."""
+    conn.execute("UPDATE books SET created_at = 'whenever' WHERE id = ?", (book,))
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert "Test Book" in response.text
+
+
+def test_cover_url_prefers_our_copy_then_gutenberg_then_nothing():
+    """Nothing is a real answer: the template draws a title plate instead, so
+    a book with no artwork does not reach for a third-party placeholder."""
+    assert main.cover_url_for(
+        {"book_id": "pg11", "cover_path": "/static/covers/11.jpg"}
+    ) == "/static/covers/11.jpg"
+
+    assert main.cover_url_for(
+        {"book_id": "pg11", "cover_path": None}
+    ).endswith("/pg11.cover.medium.jpg")
+
+    assert main.cover_url_for({"book_id": "pgtest", "cover_path": None}) is None
