@@ -44,7 +44,7 @@ docker exec -it dailylitbits python <script_name>.py [args]
 # Examples
 docker exec -it dailylitbits python ingest.py pg11
 docker exec -it dailylitbits python dispatch.py force <subscription_id>
-docker exec -it dailylitbits python tools/audit_library.py
+docker exec -it dailylitbits python tools/admin.py --list
 ```
 
 ### Testing
@@ -91,9 +91,12 @@ MongoDB any more.
 - Several queries alias columns to the names the templates already use
   (`id AS book_id`, `blurb AS description`) rather than rename in templates.
 
-Still on MongoDB and **not ported**: `src/tools/audit_library.py` and
-`src/tools/enhance_library.py`. They carry a NOT PORTED banner and will find
-an empty database. Rewrite against `db.py` or delete them.
+No code in this repo reads MongoDB any more. The last two holdouts,
+`tools/audit_library.py` and `tools/enhance_library.py`, were deleted on
+2026-10-28 rather than ported: `ingest.py` already downloads covers and writes
+blurbs for every book it takes, which is what `enhance_library.py` was for, and
+the library `audit_library.py` audited no longer exists. `pymongo` left
+`requirements.txt` with them.
 
 ### Chunk Size and Delivery Size
 
@@ -471,10 +474,9 @@ token's user - `owned_subscription(conn, sub_id, user_id)` in `main.py`.
 ## Configuration & Environment
 
 The `.env` file (not committed to git) contains:
-- `MONGO_URI`: MongoDB connection string. Must carry the `dlbapp` credentials and
-  `authSource=slow_reader_db` - the shared mongod requires authentication (see Incident Log).
-  Keep this file at mode 600.
-- `DB_NAME`: MongoDB database name. Only the two unported `tools/` scripts read it.
+Keep this file at mode 600. (`MONGO_URI` and `DB_NAME` may still be in it;
+nothing reads them since the unported `tools/` scripts were deleted, so they
+can go whenever you next edit it.)
 - `DB_PATH`: SQLite file. Defaults to `<project>/data/app.db`, which resolves
   correctly both on the host and in the container - leave it unset.
 - `ENCRYPTION_KEY`: Fernet key for email encryption (must be 32 bytes, base64-encoded)
@@ -557,8 +559,6 @@ Located in `src/tools/`:
 - `model_list.py`: List available Gemini models - run this first when an AI
   feature starts returning 404
 - `send_file_email.py`: Test email delivery
-- `audit_library.py`, `enhance_library.py`: **NOT PORTED.** Still MongoDB; they
-  will find an empty database. Rewrite against `db.py` or delete.
 
 ## Common Development Workflows
 
@@ -609,12 +609,10 @@ are read at import time and will fail the whole run if missing.
 8. **Timezone-aware timestamps** - Use `pytz` for all timezone operations
 9. **Rate limiting on binge reads** - 5-minute cooldown between manual dispatches
 10. **The database is ours, and should stay that way** - `data/app.db` is this
-    project's own SQLite file, bind-mounted from the host. Neither the website
-    nor any cron job touches the shared BlueHorseshoe mongod any more; the only
-    things still pointed at it are the two unported `tools/` scripts, and
-    `MONGO_URI` exists for them alone. Nothing new here should depend on a
-    container another stack owns - that coupling is what cost seven months of
-    downtime (see Incident Log).
+    project's own SQLite file, bind-mounted from the host. Nothing in this
+    repo reads the shared BlueHorseshoe mongod any more, and nothing new here
+    should depend on a container another stack owns - that coupling is what
+    cost seven months of downtime (see Incident Log).
 
 ## Incident Log
 

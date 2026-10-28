@@ -4,10 +4,6 @@ from dotenv import load_dotenv
 # Load variables from .env file
 load_dotenv()
 
-# Database
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
-DB_NAME = os.getenv("DB_NAME", "slow_reader_db")
-
 # SQLite. The default resolves correctly both on the host and inside the
 # container: docker-compose mounts src/ at /app and ../data at /data, so
 # dirname(dirname(config.py)) is the right parent in either place.
