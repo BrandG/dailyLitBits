@@ -4,7 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-dailyLitBits is a FastAPI-based web application that delivers serialized classic literature excerpts to subscribers via email. Users subscribe to books, receive daily parts (chunks), and can manage their reading through a token-based dashboard. The application uses MongoDB for data storage, Google Gemini AI for content generation, and Brevo for email delivery.
+dailyLitBits is a FastAPI web application that delivers public-domain
+literature by email, a few hundred words a day. A reader subscribes to a book
+and gets its next chunks each morning at an hour of their choosing, each one
+preceded by a recap of the story so far. Everything is stored in one SQLite
+file (`data/app.db`); Google Gemini writes the recaps, Jev adjudicates which
+books the library takes on, and Brevo sends the mail. Identity is a magic
+link - no password, and no separate admin login - and a reader manages their
+subscriptions from a dashboard that link opens.
 
 ## Development Environment
 
