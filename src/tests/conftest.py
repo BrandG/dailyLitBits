@@ -76,7 +76,10 @@ def sent(monkeypatch):
 @pytest.fixture
 def client():
     from fastapi.testclient import TestClient
-    return TestClient(main.app)
+    # https, because the session cookie is Secure. Over plain http the client's
+    # cookie jar silently drops it, and every session test would then pass or
+    # fail for a reason that has nothing to do with the app.
+    return TestClient(main.app, base_url="https://testserver")
 
 
 @pytest.fixture

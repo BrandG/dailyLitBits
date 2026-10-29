@@ -380,3 +380,160 @@ def test_cover_url_prefers_our_copy_then_gutenberg_then_nothing():
     ).endswith("/pg11.cover.medium.jpg")
 
     assert main.cover_url_for({"book_id": "pgtest", "cover_path": None}) is None
+
+
+# --- sessions ---
+
+def sign_in(client, user_id):
+    """Open a mailed dashboard link, which is what plants the session."""
+    token = security.generate_dashboard_token(user_id)
+    client.get(f"/profile?token={token}")
+    return token
+
+
+def test_a_mailed_link_becomes_a_session_and_sheds_the_url_token(client, reader):
+    user_id, _ = reader
+    token = security.generate_dashboard_token(user_id)
+
+    response = client.get(f"/profile?token={token}")
+
+    assert response.status_code == 200
+    assert "token=" not in str(response.url)
+    assert client.cookies.get("dlb_session") == token
+
+
+def test_the_dashboard_opens_on_the_cookie_alone(client, reader):
+    """The whole point: a page with no token in its URL still knows the reader."""
+    sign_in(client, reader[0])
+
+    response = client.get("/profile")
+
+    assert response.status_code == 200
+    assert "Test Book" in response.text
+
+
+def test_signing_out_forgets_the_browser(client, reader):
+    sign_in(client, reader[0])
+
+    client.post("/logout")
+
+    assert not client.cookies.get("dlb_session")
+    assert client.get("/profile").status_code == 400
+
+
+def test_a_mailed_link_outranks_the_session_already_in_the_browser(client, conn, reader):
+    """Two readers, one laptop: the link just clicked decides who you are."""
+    sign_in(client, reader[0])
+    second_id, _ = UserManager(conn).get_or_create_user("second@example.com")
+
+    sign_in(client, second_id)
+
+    assert client.cookies.get("dlb_session") == \
+        security.generate_dashboard_token(second_id)
+
+
+def test_a_page_with_no_session_offers_the_way_in(client, book):
+    page = client.get("/library").text
+
+    assert 'href="/login"' in page
+    assert "Sign out" not in page
+
+
+def test_a_signed_in_page_offers_the_dashboard_and_a_way_out(client, reader):
+    sign_in(client, reader[0])
+
+    page = client.get("/library").text
+
+    assert 'href="/profile"' in page
+    assert "Sign out" in page
+
+
+# --- queueing from the library ---
+
+def test_the_library_sends_a_stranger_to_the_signup_page(client, book):
+    page = client.get("/library").text
+
+    assert f'href="/?book={book}"' in page
+    assert "Add to my queue" not in page
+
+
+def test_the_library_offers_a_signed_in_reader_the_queue(client, conn, book):
+    user_id, _ = UserManager(conn).get_or_create_user("newcomer@example.com")
+    sign_in(client, user_id)
+
+    page = client.get("/library").text
+
+    assert "Add to my queue" in page
+    assert f'href="/?book={book}"' not in page
+
+
+def test_the_library_shows_what_a_reader_already_has(client, reader):
+    sign_in(client, reader[0])
+
+    page = client.get("/library").text
+
+    assert "Reading now" in page
+    assert "Add to my queue" not in page
+
+
+def test_queueing_a_book_from_the_library_sends_no_email(client, conn, reader, sent):
+    user_id, _ = reader
+    token = security.generate_dashboard_token(user_id)
+    conn.execute(
+        """INSERT INTO books (id, title, author, total_chunks, total_words, created_at)
+           VALUES ('pgsecond', 'A Second Book', 'An Author', 5, 1000,
+                   '2026-02-02T00:00:00+00:00')"""
+    )
+
+    response = client.post("/queue_book", data={"token": token, "book_id": "pgsecond"})
+
+    assert "A Second Book" in response.text
+    assert "in your queue" in response.text
+    row = conn.execute(
+        "SELECT status FROM subscriptions WHERE user_id = ? AND book_id = 'pgsecond'",
+        (user_id,),
+    ).fetchone()
+    assert row["status"] == "queued"
+    assert sent == [], "queueing from the dashboard should not mail a welcome"
+
+
+def test_queueing_a_readers_first_book_starts_it(client, conn, book):
+    user_id, _ = UserManager(conn).get_or_create_user("newcomer@example.com")
+    token = security.generate_dashboard_token(user_id)
+
+    response = client.post("/queue_book", data={"token": token, "book_id": book})
+
+    assert "starts arriving tomorrow" in response.text
+    row = conn.execute(
+        "SELECT status FROM subscriptions WHERE user_id = ?", (user_id,)
+    ).fetchone()
+    assert row["status"] == "active"
+
+
+def test_queueing_will_not_add_the_same_book_twice(client, conn, reader):
+    user_id, _ = reader
+    token = security.generate_dashboard_token(user_id)
+
+    response = client.post("/queue_book", data={"token": token, "book_id": "pgtest"})
+
+    assert "already on your list" in response.text
+    assert conn.execute(
+        "SELECT COUNT(*) FROM subscriptions WHERE user_id = ?", (user_id,)
+    ).fetchone()[0] == 1
+
+
+def test_queueing_refuses_a_token_we_did_not_sign(client, conn, book):
+    """The form token, not the cookie, is what authorises this write."""
+    response = client.post("/queue_book",
+                           data={"token": "not-a-real-token", "book_id": book})
+
+    assert response.status_code == 400
+    assert conn.execute("SELECT COUNT(*) FROM subscriptions").fetchone()[0] == 0
+
+
+def test_queueing_a_book_that_is_not_in_the_library(client, reader):
+    token = security.generate_dashboard_token(reader[0])
+
+    response = client.post("/queue_book", data={"token": token, "book_id": "pgnope"})
+
+    assert response.status_code == 404

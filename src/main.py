@@ -50,8 +50,34 @@ def get_db():
         conn.close()
 
 
+def message_page(heading, body=None, action_url=None, action_label=None, status=400):
+    """A short page with one way forward.
+
+    Rendered without a Request, so it can be returned from a handler that has
+    none, and with signed_in forced false: these are the pages you land on
+    when we could not work out who you are, and a nav offering "My dashboard"
+    there would be a lie.
+    """
+    html = templates.get_template("message.html").render(
+        heading=heading, body=body,
+        action_url=action_url, action_label=action_label,
+        signed_in=False,
+    )
+    return HTMLResponse(html, status_code=status)
+
+
 def invalid_link(message="Invalid or expired link"):
-    return HTMLResponse(f"<h1>{message}</h1>", status_code=400)
+    """Where a dead link lands: a lapsed session, a mistyped token, a link
+    meant for another address. Signing out and then returning to a bookmarked
+    /profile arrives here too, which is why it offers a fresh link rather than
+    a bare sentence."""
+    return message_page(
+        message,
+        "This link may have expired, been mistyped, or been meant for a "
+        "different address. We can send a fresh one to your inbox.",
+        action_url="/login",
+        action_label="Email me a new link",
+    )
 
 
 def simple_page(heading, body, colour="#2c3e50"):
@@ -70,7 +96,14 @@ def simple_page(heading, body, colour="#2c3e50"):
 
 
 def user_from_token(conn, token):
-    """Resolves a dashboard token to a user row, or None."""
+    """Resolves a dashboard token to a user row, or None.
+
+    Takes None without complaint: a visitor carrying neither a link nor a
+    session is now an ordinary case, not a malformed request.
+    """
+    if not token:
+        return None
+
     user_id = verify_dashboard_token(token)
     if not user_id:
         return None
@@ -82,6 +115,119 @@ def owned_subscription(conn, sub_id, user_id):
     return conn.execute(
         "SELECT * FROM subscriptions WHERE id = ? AND user_id = ?", (sub_id, user_id)
     ).fetchone()
+
+
+# --- SESSION ---
+#
+# The signed dashboard token IS the credential (see security.py), and until now
+# the only place it ever lived was the address bar. Clicking "Library" from the
+# dashboard dropped it, so the next page had no idea who the reader was.
+#
+# So we hand the same token to the browser as a cookie and let the browser
+# carry it. No session table and no second secret: a cookie is checked by the
+# same verify_dashboard_token() a URL token goes through.
+SESSION_COOKIE = "dlb_session"
+SESSION_MAX_AGE = 30 * 24 * 3600  # thirty days, then it lapses on its own
+
+
+def set_session(response, token):
+    """Hands the token to the browser.
+
+    httponly: page scripts cannot read it, so an injected script cannot lift it.
+    secure:   never sent over plain http.
+    samesite: not sent when another site posts a form at us, which is what
+              keeps the dashboard's own forms safe now that a cookie can
+              identify their sender.
+    """
+    response.set_cookie(
+        SESSION_COOKIE, token,
+        max_age=SESSION_MAX_AGE,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+    )
+    return response
+
+
+def clear_session(response):
+    # An empty value with no lifetime, rather than delete_cookie, so the same
+    # flags go out on the way back - a cookie is only replaced by one whose
+    # name, path and flags match.
+    response.set_cookie(
+        SESSION_COOKIE, "", max_age=0, httponly=True, secure=True, samesite="lax"
+    )
+    return response
+
+
+def session_token(request, token=None):
+    """This request's token: the URL's if it has one, otherwise the cookie's.
+
+    A mailed link wins deliberately. A reader opening a fresh link in a browser
+    that already holds a session gets the identity they just clicked, which is
+    what a household sharing a laptop would expect.
+    """
+    return token or request.cookies.get(SESSION_COOKIE)
+
+
+def user_from_request(conn, request, token=None):
+    return user_from_token(conn, session_token(request, token))
+
+
+def signed_in(request):
+    """Whether the nav should offer a dashboard rather than a way in.
+
+    Signature only, no database: this is asked on every page, and it decides
+    which link to draw, not what anyone is allowed to reach.
+    """
+    return bool(verify_dashboard_token(request.cookies.get(SESSION_COOKIE) or ""))
+
+
+# --- WHAT A READER ALREADY HAS ---
+
+BOOK_STATE_LABELS = {
+    "active": "Reading now",
+    "paused": "Paused",
+    "queued": "In your queue",
+    "completed": "Finished",
+}
+
+
+def book_states(conn, user_id):
+    """This reader's standing with each book, keyed by book id.
+
+    One entry per book, favouring the live subscription: an old completed row
+    can sit beside a fresh one for the same book, and "Reading now" is the
+    truer label of the two.
+    """
+    rows = conn.execute(
+        """SELECT book_id, status FROM subscriptions
+           WHERE user_id = ? AND status IN ('active', 'paused', 'queued', 'completed')
+           ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'paused' THEN 1
+                                WHEN 'queued' THEN 2 ELSE 3 END""",
+        (user_id,),
+    ).fetchall()
+
+    states = {}
+    for row in rows:
+        states.setdefault(row["book_id"], row["status"])
+    return states
+
+
+def library_notice(conn, started=None, queued=None, already=None):
+    """The line confirming a queue click, which travels back through the URL.
+
+    A redirect keeps nothing the handler knew, so the outcome rides as a book
+    id and the title is looked up again here.
+    """
+    for book_id, sentence in ((started, "'{title}' starts arriving tomorrow morning."),
+                              (queued, "'{title}' is in your queue."),
+                              (already, "'{title}' is already on your list.")):
+        if not book_id:
+            continue
+        row = conn.execute("SELECT title FROM books WHERE id = ?", (book_id,)).fetchone()
+        if row:
+            return sentence.format(title=row["title"])
+    return None
 
 
 def book_choices(conn):
@@ -194,12 +340,13 @@ def send_dashboard_link(to_email, dashboard_link):
 @app.get("/", response_class=HTMLResponse)
 async def read_root(request: Request, conn=Depends(get_db)):
     return templates.TemplateResponse("index.html", {
-        "request": request, "books": book_choices(conn), "recent": recent_books(conn)
+        "request": request, "signed_in": signed_in(request), "books": book_choices(conn), "recent": recent_books(conn)
     })
 
 
 @app.get("/library", response_class=HTMLResponse)
-async def library(request: Request, conn=Depends(get_db)):
+async def library(request: Request, started: str = None, queued: str = None,
+                  already: str = None, conn=Depends(get_db)):
     rows = conn.execute(
         """SELECT id AS book_id, title, author, total_chunks,
                   blurb AS description, cover_path
@@ -212,17 +359,28 @@ async def library(request: Request, conn=Depends(get_db)):
         book["cover_url"] = cover_url_for(book)
         books.append(book)
 
-    return templates.TemplateResponse("library.html", {"request": request, "books": books})
+    # Signed in, the library stops being a catalogue and becomes the place a
+    # reader manages their own list, so it needs to know who is looking.
+    user = user_from_request(conn, request)
+
+    return templates.TemplateResponse("library.html", {
+        "request": request, "signed_in": signed_in(request),
+        "books": books,
+        "token": session_token(request) if user else None,
+        "book_states": book_states(conn, user["id"]) if user else {},
+        "state_labels": BOOK_STATE_LABELS,
+        "notice": library_notice(conn, started=started, queued=queued, already=already),
+    })
 
 
 @app.get("/privacy", response_class=HTMLResponse)
 async def privacy(request: Request):
-    return templates.TemplateResponse("privacy.html", {"request": request})
+    return templates.TemplateResponse("privacy.html", {"request": request, "signed_in": signed_in(request)})
 
 
 @app.get("/intro", response_class=HTMLResponse)
 async def intro_page(request: Request):
-    return templates.TemplateResponse("intro.html", {"request": request})
+    return templates.TemplateResponse("intro.html", {"request": request, "signed_in": signed_in(request)})
 
 
 # --- SIGNUP ---
@@ -239,7 +397,7 @@ async def handle_signup(
     book = conn.execute("SELECT id, title FROM books WHERE id = ?", (book_id,)).fetchone()
     if not book:
         return templates.TemplateResponse("index.html", {
-            "request": request, "books": book_choices(conn), "recent": recent_books(conn),
+            "request": request, "signed_in": signed_in(request), "books": book_choices(conn), "recent": recent_books(conn),
             "message": "That book is not in the library.",
         })
 
@@ -285,12 +443,12 @@ async def handle_signup(
                           chunks_per_day=chunks_per_day)
     except _AlreadySubscribed as already:
         return templates.TemplateResponse("index.html", {
-            "request": request, "books": book_choices(conn), "recent": recent_books(conn), "message": str(already),
+            "request": request, "signed_in": signed_in(request), "books": book_choices(conn), "recent": recent_books(conn), "message": str(already),
         })
     except Exception as exc:
         log(f"[ERROR] Signup failed: {type(exc).__name__}: {exc}")
         return templates.TemplateResponse("index.html", {
-            "request": request, "books": book_choices(conn), "recent": recent_books(conn),
+            "request": request, "signed_in": signed_in(request), "books": book_choices(conn), "recent": recent_books(conn),
             "message": "Something went wrong creating your subscription.",
         })
 
@@ -303,7 +461,7 @@ async def handle_signup(
                f"Success! '{book['title']}' starts tomorrow. Check your email for your dashboard link.")
 
     return templates.TemplateResponse("index.html", {
-        "request": request, "books": book_choices(conn), "recent": recent_books(conn), "message": message,
+        "request": request, "signed_in": signed_in(request), "books": book_choices(conn), "recent": recent_books(conn), "message": message,
     })
 
 
@@ -315,7 +473,7 @@ class _AlreadySubscribed(Exception):
 
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request):
-    return templates.TemplateResponse("login.html", {"request": request})
+    return templates.TemplateResponse("login.html", {"request": request, "signed_in": signed_in(request)})
 
 
 @app.post("/login", response_class=HTMLResponse)
@@ -329,18 +487,34 @@ async def handle_login(request: Request, email: str = Form(...), conn=Depends(ge
                                    f"{security.generate_dashboard_token(user['id'])}")
 
     return templates.TemplateResponse("login.html", {
-        "request": request,
+        "request": request, "signed_in": signed_in(request),
         "message": "If that address has a subscription, its dashboard link is on its way.",
     })
+
+
+@app.post("/logout")
+async def logout():
+    """Forgets the browser. Worth having on a shared machine - and it locks
+    nobody out, because the mailed link still works."""
+    return clear_session(RedirectResponse(url="/", status_code=303))
 
 
 # --- DASHBOARD ---
 
 @app.get("/profile", response_class=HTMLResponse)
-async def profile_page(request: Request, token: str, conn=Depends(get_db)):
-    user = user_from_token(conn, token)
+async def profile_page(request: Request, token: str = None, conn=Depends(get_db)):
+    user = user_from_request(conn, request, token)
     if not user:
         return invalid_link()
+
+    # A token that arrived in the URL becomes the session, and then the URL is
+    # swapped for a bare /profile. The credential stops being left behind in
+    # browser history, in a screenshot of the page, or in the referrer sent to
+    # whoever hosts a cover image.
+    if token:
+        return set_session(RedirectResponse(url="/profile", status_code=303), token)
+
+    token = session_token(request)
 
     current = conn.execute(
         """SELECT * FROM subscriptions WHERE user_id = ?
@@ -365,7 +539,7 @@ async def profile_page(request: Request, token: str, conn=Depends(get_db)):
 
     # NB: `current` is resolved above, because `others` excludes it by id.
     context = {
-        "request": request,
+        "request": request, "signed_in": signed_in(request),
         "token": token,
         "user_tz": user["timezone"],
         "is_admin": user["role"] == "admin",
@@ -515,6 +689,53 @@ async def switch_book(token: str, new_book_id: str, conn=Depends(get_db)):
     )
 
 
+@app.post("/queue_book", response_class=HTMLResponse)
+async def queue_book(token: str = Form(...), book_id: str = Form(...),
+                     conn=Depends(get_db)):
+    """Add a book from the library in one click, with no email round-trip.
+
+    The token comes from the form rather than from the cookie alone, and that
+    is on purpose: it is what stops another site from posting this at a
+    signed-in reader's account.
+    """
+    user = user_from_token(conn, token)
+    if not user:
+        return invalid_link()
+
+    book = conn.execute("SELECT id, title FROM books WHERE id = ?", (book_id,)).fetchone()
+    if not book:
+        return message_page("Book not found",
+                            "That book is not in the library any more.",
+                            action_url="/library", action_label="Back to the library",
+                            status=404)
+
+    if book_id in book_states(conn, user["id"]):
+        return RedirectResponse(url=f"/library?already={book_id}", status_code=303)
+
+    # A reader's first book starts arriving; anything after it waits its turn.
+    # Same rule as /signup, and the queue is ordered by created_at, so clicking
+    # these in the order you want them is enough.
+    active_count = conn.execute(
+        "SELECT COUNT(*) FROM subscriptions WHERE user_id = ? AND status = 'active'",
+        (user["id"],),
+    ).fetchone()[0]
+    status = "active" if active_count == 0 else "queued"
+
+    with db.transaction(conn):
+        cur = conn.execute(
+            """INSERT INTO subscriptions
+                   (user_id, book_id, status, current_sequence, chunks_per_day,
+                    delivery_hour, last_sent, created_at)
+               VALUES (?, ?, ?, 1, 2, ?, NULL, ?)""",
+            (user["id"], book_id, status, dispatch.TARGET_HOUR, utc_now()),
+        )
+        events.record(conn, "subscribed", subscription_id=cur.lastrowid,
+                      book_id=book_id, sequence=1, status=status, trigger="library")
+
+    outcome = "started" if status == "active" else "queued"
+    return RedirectResponse(url=f"/library?{outcome}={book_id}", status_code=303)
+
+
 # --- EMAIL LINKS (scoped to one subscription) ---
 
 @app.get("/next", response_class=HTMLResponse)
@@ -581,7 +802,7 @@ async def unsubscribe_process(token: str = Form(...), conn=Depends(get_db)):
 
 @app.get("/suggest", response_class=HTMLResponse)
 async def suggest_page(request: Request):
-    return templates.TemplateResponse("suggest.html", {"request": request})
+    return templates.TemplateResponse("suggest.html", {"request": request, "signed_in": signed_in(request)})
 
 
 @app.post("/suggest", response_class=HTMLResponse)
@@ -642,4 +863,4 @@ async def admin_dashboard(request: Request, token: str = "", conn=Depends(get_db
             "last_sent": last_sent.strftime("%Y-%m-%d %H:%M") if last_sent else "Never",
         })
 
-    return templates.TemplateResponse("admin.html", {"request": request, "users": user_data})
+    return templates.TemplateResponse("admin.html", {"request": request, "signed_in": signed_in(request), "users": user_data})

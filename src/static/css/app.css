@@ -537,3 +537,44 @@ a:hover {
     margin-bottom: 0 !important;
     padding-bottom: 0 !important;
 }
+
+/* A reader's own standing with a book, on its library card. Quiet by
+   default and accented only for the book actually arriving, so a shelf of
+   finished books does not shout. */
+.book-state {
+    display: inline-block;
+    font-family: var(--dlb-sans);
+    font-size: .7rem;
+    font-weight: 600;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    padding: .2rem .55rem;
+    margin-bottom: .75rem;
+    border-radius: 999px;
+    background-color: var(--dlb-surface-2);
+    color: var(--dlb-ink-muted);
+    border: 1px solid var(--dlb-border);
+}
+
+.book-state.active {
+    background-color: var(--dlb-accent-soft);
+    color: var(--dlb-accent);
+    border-color: var(--dlb-accent);
+}
+
+.book-state.paused { border-color: #b0833a; color: #b0833a; }
+
+/* The sign-out button sits in a form, so it needs the nav's own restraint
+   rather than a button's weight. */
+.site-nav form .btn-quiet { padding-left: .5rem; padding-right: .5rem; }
+
+/* The nav carries four things once a reader is signed in. Nothing in it
+   should break across lines. */
+.site-nav .nav-link-quiet,
+.site-nav .btn { white-space: nowrap; }
+
+@media (max-width: 575.98px) {
+    /* Four does not fit a phone. "How it works" is in the footer of every
+       page, so it is the one that stands down. */
+    .site-nav .nav-hide-sm { display: none; }
+}

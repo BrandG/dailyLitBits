@@ -1,0 +1,36 @@
+{# One short page with one way forward. Used where a request cannot be
+   carried out and there is nothing to show: a dead link, mainly. #}
+{% set page_title = heading ~ ' - DailyLitBits' %}
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    {% include 'head.html' %}
+</head>
+
+<body>
+
+    {% include 'header.html' %}
+
+    <div class="container">
+        <div class="row justify-content-center">
+            <div class="col-md-7 col-lg-5">
+                <div class="card shadow-sm">
+                    <div class="card-body p-4 text-center">
+                        <h1 class="h4 mb-3">{{ heading }}</h1>
+                        {% if body %}
+                        <p class="text-muted">{{ body }}</p>
+                        {% endif %}
+                        {% if action_url %}
+                        <a href="{{ action_url }}" class="btn btn-primary btn-sm">{{ action_label }}</a>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        {% include 'footer.html' %}
+    </div>
+</body>
+
+</html>

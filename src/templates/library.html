@@ -16,6 +16,14 @@
             <p>{{ books|length }} books, a few hundred words at a time.</p>
         </div>
 
+        {% if notice %}
+        <div class="row justify-content-center mb-4">
+            <div class="col-md-8">
+                <div class="alert alert-success text-center mb-0" role="alert">{{ notice }}</div>
+            </div>
+        </div>
+        {% endif %}
+
         <div class="row justify-content-center mb-4">
             <div class="col-md-6">
                 <label for="searchInput" class="visually-hidden">Search the library</label>
@@ -53,9 +61,35 @@
                             {% endif %}
                         </p>
 
+                        {# Three readers see three different cards here: one who
+                           already has this book, one signed in who does not, and
+                           a stranger, who still gets the signup page they always
+                           did. book_states is empty for the last two. #}
+                        {% set state = (book_states or {}).get(book.book_id) %}
+
+                        {% if state %}
+                        <div class="book-state {{ state }}">{{ state_labels[state] }}</div>
+                        {% if state in ('queued', 'paused') %}
+                        <a href="/switch_book?token={{ token }}&new_book_id={{ book.book_id }}"
+                            class="btn btn-outline-primary btn-sm w-100">
+                            {{ 'Resume this now' if state == 'paused' else 'Read this next' }}
+                        </a>
+                        {% endif %}
+
+                        {% elif token %}
+                        <form action="/queue_book" method="post">
+                            <input type="hidden" name="token" value="{{ token }}">
+                            <input type="hidden" name="book_id" value="{{ book.book_id }}">
+                            <button type="submit" class="btn btn-outline-primary btn-sm w-100">
+                                Add to my queue
+                            </button>
+                        </form>
+
+                        {% else %}
                         <a href="/?book={{ book.book_id }}" class="btn btn-outline-primary btn-sm w-100">
                             Read this
                         </a>
+                        {% endif %}
                     </div>
                 </div>
             </div>
