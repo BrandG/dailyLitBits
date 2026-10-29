@@ -578,3 +578,121 @@ a:hover {
        page, so it is the one that stands down. */
     .site-nav .nav-hide-sm { display: none; }
 }
+
+/* --- By the numbers ---------------------------------------------------- */
+/* Numbers only: no chart here, so no series colours. Figures wear ink, and
+   the one accent on the page is the magnitude bar in the ranking. */
+
+.figure-lead { text-align: center; margin: 0 0 2.5rem; }
+
+.figure-n {
+    font-family: var(--dlb-serif);
+    font-size: clamp(2.5rem, 9vw, 4.25rem);
+    line-height: 1.05;
+    color: var(--dlb-ink);
+    font-variant-numeric: tabular-nums;
+}
+
+.figure-label {
+    font-family: var(--dlb-sans);
+    font-size: .78rem;
+    font-weight: 600;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--dlb-ink-muted);
+    margin-top: .5rem;
+}
+
+.figure-note { color: var(--dlb-ink-muted); font-size: .95rem; margin-top: .9rem; }
+
+.stat-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 1rem;
+    margin-bottom: 2.5rem;
+}
+
+.stat {
+    background-color: var(--dlb-surface);
+    border: 1px solid var(--dlb-border);
+    border-radius: 12px;
+    padding: 1.1rem .75rem;
+    text-align: center;
+}
+
+.stat-n {
+    font-family: var(--dlb-serif);
+    font-size: 1.7rem;
+    line-height: 1.1;
+    color: var(--dlb-ink);
+    font-variant-numeric: tabular-nums;
+}
+
+.stat-label {
+    font-family: var(--dlb-sans);
+    font-size: .68rem;
+    font-weight: 600;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--dlb-ink-muted);
+    margin-top: .35rem;
+}
+
+.ends { margin-bottom: 2.5rem; }
+
+.end {
+    display: flex;
+    align-items: baseline;
+    gap: .6rem;
+    flex-wrap: wrap;
+    padding-bottom: .75rem;
+    margin-bottom: .75rem;
+    border-bottom: 1px solid var(--dlb-border);
+}
+
+.end:last-child { border-bottom: 0; margin-bottom: 0; padding-bottom: 0; }
+
+.end-label {
+    font-family: var(--dlb-sans);
+    font-size: .68rem;
+    font-weight: 600;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--dlb-ink-muted);
+    min-width: 4.75rem;
+}
+
+.end-n { color: var(--dlb-ink-muted); font-size: .9rem; margin-left: auto; }
+
+.ranking h2 { font-family: var(--dlb-serif); font-size: 1.5rem; margin-bottom: 1.25rem; }
+
+.rank-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 7rem 2.5rem;
+    align-items: center;
+    gap: 1rem;
+    padding: .6rem 0;
+    border-bottom: 1px solid var(--dlb-border);
+}
+
+.rank-row:last-of-type { border-bottom: 0; }
+.rank-title a { color: var(--dlb-ink); text-decoration: none; }
+.rank-title a:hover { text-decoration: underline; }
+.rank-author { display: block; color: var(--dlb-ink-muted); font-size: .85rem; }
+
+/* One series, so one hue: the length is the whole message. */
+.rank-bar { height: 8px; background-color: var(--dlb-surface-2); border-radius: 4px; }
+
+.rank-bar span {
+    display: block;
+    height: 100%;
+    background-color: var(--dlb-accent);
+    border-radius: 4px;
+}
+
+.rank-n { text-align: right; color: var(--dlb-ink); font-variant-numeric: tabular-nums; }
+
+@media (max-width: 575.98px) {
+    .stat-grid { grid-template-columns: repeat(2, 1fr); }
+    .rank-row { grid-template-columns: minmax(0, 1fr) 4rem 2rem; gap: .6rem; }
+}

@@ -23,6 +23,7 @@ import db
 import dispatch
 import events
 import security
+import stats
 from security import verify_unsub_token, verify_next_token, verify_dashboard_token
 from user_manager import UserManager
 
@@ -381,6 +382,15 @@ async def privacy(request: Request):
 @app.get("/intro", response_class=HTMLResponse)
 async def intro_page(request: Request):
     return templates.TemplateResponse("intro.html", {"request": request, "signed_in": signed_in(request)})
+
+
+@app.get("/stats", response_class=HTMLResponse)
+async def stats_page(request: Request, conn=Depends(get_db)):
+    """The public numbers. See stats.py for which of them involve a reader."""
+    return templates.TemplateResponse("stats.html", {
+        "request": request, "signed_in": signed_in(request),
+        **stats.public_stats(conn),
+    })
 
 
 # --- SIGNUP ---

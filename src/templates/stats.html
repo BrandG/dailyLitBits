@@ -1,0 +1,97 @@
+{% set page_title = 'By the numbers - DailyLitBits' %}
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    {% include 'head.html' %}
+</head>
+
+<body>
+
+    {% include 'header.html' %}
+
+    <div class="container mb-5">
+        <div class="hero">
+            <h1>By the numbers</h1>
+            <p>What is on the shelf, and what has gone out.</p>
+        </div>
+
+        <div class="row justify-content-center">
+            <div class="col-lg-9">
+
+                {# The one number worth standing on its own. A shelf this size
+                   is not a reading list, it is a span of time. #}
+                <section class="figure-lead">
+                    <div class="figure-n">{{ "{:,}".format(library.words) }}</div>
+                    <div class="figure-label">words waiting to be read</div>
+                    <p class="figure-note">
+                        {{ "{:,}".format(library.parts) }} parts, two a morning
+                        &mdash; about <strong>{{ library.years }} years</strong> of reading.
+                    </p>
+                </section>
+
+                <section class="stat-grid">
+                    <div class="stat">
+                        <div class="stat-n">{{ "{:,}".format(library.books) }}</div>
+                        <div class="stat-label">Books</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-n">{{ "{:,}".format(library.authors) }}</div>
+                        <div class="stat-label">Authors</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-n">{{ "{:,}".format(served.books) }}</div>
+                        <div class="stat-label">Books served</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-n">{{ "{:,}".format(served.words) }}</div>
+                        <div class="stat-label">Words served</div>
+                    </div>
+                </section>
+
+                {% if library.longest and library.shortest %}
+                <section class="ends">
+                    <div class="end">
+                        <span class="end-label">Longest</span>
+                        <strong>{{ library.longest.title }}</strong>
+                        <span class="end-n">{{ "{:,}".format(library.longest.total_words) }} words</span>
+                    </div>
+                    <div class="end">
+                        <span class="end-label">Shortest</span>
+                        <strong>{{ library.shortest.title }}</strong>
+                        <span class="end-n">{{ "{:,}".format(library.shortest.total_words) }} words</span>
+                    </div>
+                </section>
+                {% endif %}
+
+                {# Absent entirely until the ranking describes a readership
+                   rather than a handful of identifiable people. An empty
+                   section would say as much as the list would. #}
+                {% if popular %}
+                <section class="ranking">
+                    <h2>Most popular books</h2>
+                    {% set most = popular[0].readers %}
+                    {% for book in popular %}
+                    <div class="rank-row">
+                        <div class="rank-title">
+                            <a href="/?book={{ book.book_id }}">{{ book.title }}</a>
+                            <span class="rank-author">{{ book.author }}</span>
+                        </div>
+                        <div class="rank-bar" aria-hidden="true">
+                            <span style="width: {{ (book.readers / most * 100)|round|int }}%;"></span>
+                        </div>
+                        <div class="rank-n">{{ book.readers }}</div>
+                    </div>
+                    {% endfor %}
+                    <p class="figure-note mt-3">Readers who have taken on each book.</p>
+                </section>
+                {% endif %}
+
+            </div>
+        </div>
+
+        {% include 'footer.html' %}
+    </div>
+</body>
+
+</html>
