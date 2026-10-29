@@ -696,3 +696,22 @@ a:hover {
     .stat-grid { grid-template-columns: repeat(2, 1fr); }
     .rank-row { grid-template-columns: minmax(0, 1fr) 4rem 2rem; gap: .6rem; }
 }
+
+/* The stats page groups its tiles: what we hold, and what we have sent. */
+.group-head {
+    font-family: var(--dlb-sans);
+    font-size: .72rem;
+    font-weight: 600;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--dlb-ink-muted);
+    margin: 0 0 .75rem;
+}
+
+.stat-grid.cols-2 { grid-template-columns: repeat(2, 1fr); }
+.stat-grid.cols-3 { grid-template-columns: repeat(3, 1fr); }
+
+@media (max-width: 575.98px) {
+    /* Three long numbers do not fit a phone; two do. */
+    .stat-grid.cols-3 { grid-template-columns: repeat(2, 1fr); }
+}

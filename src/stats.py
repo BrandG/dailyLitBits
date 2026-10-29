@@ -55,16 +55,39 @@ def library_facts(conn):
 def served_facts(conn):
     """What has actually left the building.
 
-    books counts subscriptions started - a book handed to a reader - rather
-    than distinct titles. That is the number the ranking is drawn from, so it
-    is the right one to gate the ranking on; a library of 107 titles would
-    otherwise cap the gate below its own threshold forever.
+    books counts subscriptions that have had at least one part emailed, not
+    subscriptions started. A queued book has been chosen, not served: nothing
+    went out, nobody read anything, and counting it would let one reader with
+    a long queue inflate the number - and open the ranking's gate - without a
+    single email being sent.
+
+    It counts subscriptions rather than titles because the same book served to
+    forty readers is forty books served, and because a count of titles would
+    cap at the size of the library and could never clear a threshold near it.
+
+    One honest consequence: a deletion request severs an event from its
+    subscription (ON DELETE SET NULL, see the schema), so a reader exercising
+    it takes their books back out of this count and the number can fall. That
+    is the schema keeping the promise /privacy makes, and it is the right way
+    round - the alternative is a counter that remembers people who asked to be
+    forgotten.
 
     words counts the text of the parts that were really sent, by reading each
     delivery's own span out of the event log rather than assuming every
     delivery carried the current setting.
+
+    finished counts subscriptions read to the end, which on a site about
+    finishing long books slowly is the number that means the most and moves
+    the least.
     """
-    books = conn.execute("SELECT COUNT(*) FROM subscriptions").fetchone()[0]
+    books = conn.execute(
+        """SELECT COUNT(DISTINCT subscription_id) FROM events
+           WHERE event = 'delivered' AND subscription_id IS NOT NULL"""
+    ).fetchone()[0]
+
+    finished = conn.execute(
+        "SELECT COUNT(*) FROM subscriptions WHERE status = 'completed'"
+    ).fetchone()[0]
     words = conn.execute(
         """SELECT COALESCE(SUM(c.word_count), 0)
            FROM events e
@@ -76,7 +99,7 @@ def served_facts(conn):
            WHERE e.event = 'delivered'"""
     ).fetchone()[0]
 
-    return {"books": books, "words": words}
+    return {"books": books, "finished": finished, "words": words}
 
 
 def popular_books(conn, books_served, limit=10):

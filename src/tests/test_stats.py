@@ -71,15 +71,71 @@ def test_served_words_count_the_parts_actually_sent(conn, book):
 
 
 def test_nothing_served_is_zero_not_an_error(conn, book):
-    assert stats.served_facts(conn) == {"books": 0, "words": 0}
+    assert stats.served_facts(conn) == {"books": 0, "finished": 0, "words": 0}
 
 
-def test_books_served_counts_books_handed_out_not_titles(conn, book):
+def deliver(conn, sub_id, book_id, sequence=1, parts=2):
+    conn.execute(
+        """INSERT INTO events (occurred_at, event, subscription_id, book_id,
+                               sequence, detail)
+           VALUES ('2026-01-02T06:00:00+00:00', 'delivered', ?, ?, ?, ?)""",
+        (sub_id, book_id, sequence, '{"parts": %d, "trigger": "cron"}' % parts),
+    )
+
+
+def last_sub(conn):
+    return conn.execute("SELECT id FROM subscriptions ORDER BY id DESC LIMIT 1").fetchone()[0]
+
+
+def test_a_queued_book_is_not_a_served_book(conn, book):
+    """The whole point of the correction: choosing a book is not being sent
+    one. Otherwise a single reader with a long queue could run the number up
+    without a single email going out."""
+    subscribe(conn, "eager@example.com")
+    conn.execute("UPDATE subscriptions SET status = 'queued' WHERE id = ?", (last_sub(conn),))
+
+    assert stats.served_facts(conn)["books"] == 0
+
+
+def test_books_served_counts_subscriptions_that_were_emailed(conn, book):
     subscribe(conn, "one@example.com")
-    subscribe(conn, "two@example.com")
+    served = last_sub(conn)
+    deliver(conn, served, book)
+    deliver(conn, served, book, sequence=3)   # same book again, still one book
 
-    # One title, two readers: two books served.
+    subscribe(conn, "two@example.com")        # never delivered to
+
+    assert stats.served_facts(conn)["books"] == 1
+
+
+def test_the_same_title_to_two_readers_is_two_books_served(conn, book):
+    subscribe(conn, "one@example.com")
+    deliver(conn, last_sub(conn), book)
+    subscribe(conn, "two@example.com")
+    deliver(conn, last_sub(conn), book)
+
     assert stats.served_facts(conn)["books"] == 2
+
+
+def test_a_forgotten_reader_leaves_the_count(conn, book):
+    """A deletion request severs the event from its subscription, so the
+    books it served stop being countable. The schema's promise wins."""
+    subscribe(conn, "leaving@example.com")
+    deliver(conn, last_sub(conn), book)
+    assert stats.served_facts(conn)["books"] == 1
+
+    conn.execute("UPDATE events SET subscription_id = NULL WHERE event = 'delivered'")
+
+    assert stats.served_facts(conn)["books"] == 0
+
+
+def test_books_read_to_the_end_are_counted(conn, book):
+    subscribe(conn, "finisher@example.com")
+    conn.execute("UPDATE subscriptions SET status = 'completed' WHERE id = ?",
+                 (last_sub(conn),))
+    subscribe(conn, "still-going@example.com")
+
+    assert stats.served_facts(conn)["finished"] == 1
 
 
 # --- the gate ---
@@ -119,6 +175,7 @@ def test_the_stats_page_shows_the_library(client, book):
 
     assert "words waiting to be read" in page
     assert "3,200" in page
+    assert "Read to the end" in page
 
 
 def test_the_stats_page_hides_the_ranking_while_it_would_name_people(client, conn, book):
@@ -136,6 +193,8 @@ def test_the_stats_page_shows_the_ranking_once_the_gate_opens(
         client, conn, book, monkeypatch):
     monkeypatch.setattr(stats, "POPULARITY_THRESHOLD", 0)
     subscribe(conn, "a@example.com")
+    # Served, not merely chosen - otherwise the gate stays shut at zero.
+    deliver(conn, last_sub(conn), book)
 
     page = client.get("/stats").text
 
