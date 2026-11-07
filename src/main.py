@@ -22,6 +22,7 @@ import config
 import db
 import dispatch
 import events
+import reading_queue
 import security
 import stats
 from security import verify_unsub_token, verify_next_token, verify_dashboard_token
@@ -229,6 +230,23 @@ def library_notice(conn, started=None, queued=None, already=None):
         if row:
             return sentence.format(title=row["title"])
     return None
+
+
+def with_queue_ends(rows):
+    """Mark the first and last book in the queue, so the page can draw the
+    arrows that would do nothing as disabled rather than as a trap.
+
+    Paused books sit in the same list but are not in the queue, so they do not
+    count towards either end.
+    """
+    books = [dict(row) for row in rows]
+    in_line = [book for book in books if book["status"] == "queued"]
+
+    for position, book in enumerate(in_line):
+        book["first_in_queue"] = position == 0
+        book["last_in_queue"] = position == len(in_line) - 1
+
+    return books
 
 
 def book_choices(conn):
@@ -441,12 +459,15 @@ async def handle_signup(
             ).fetchone()[0]
             status = "active" if active_count == 0 else "queued"
 
+            position = (reading_queue.back_position(conn, user_id)
+                        if status == "queued" else None)
             cur = conn.execute(
                 """INSERT INTO subscriptions
                        (user_id, book_id, status, current_sequence, chunks_per_day,
-                        delivery_hour, last_sent, created_at)
-                   VALUES (?, ?, ?, 1, ?, ?, NULL, ?)""",
-                (user_id, book_id, status, chunks_per_day, dispatch.TARGET_HOUR, utc_now()),
+                        delivery_hour, queue_position, last_sent, created_at)
+                   VALUES (?, ?, ?, 1, ?, ?, ?, NULL, ?)""",
+                (user_id, book_id, status, chunks_per_day, dispatch.TARGET_HOUR,
+                 position, utc_now()),
             )
             events.record(conn, "subscribed", subscription_id=cur.lastrowid,
                           book_id=book_id, sequence=1, status=status,
@@ -543,7 +564,8 @@ async def profile_page(request: Request, token: str = None, conn=Depends(get_db)
                   b.id AS book_id, b.title, b.author, b.total_chunks
            FROM subscriptions s JOIN books b ON b.id = s.book_id
            WHERE s.user_id = ? AND s.status IN ('queued', 'paused') AND s.id != ?
-           ORDER BY CASE s.status WHEN 'paused' THEN 0 ELSE 1 END, s.created_at""",
+           ORDER BY CASE s.status WHEN 'paused' THEN 0 ELSE 1 END,
+                    s.queue_position, s.created_at""",
         (user["id"], current["id"] if current else -1),
     ).fetchall()
 
@@ -553,7 +575,7 @@ async def profile_page(request: Request, token: str = None, conn=Depends(get_db)
         "token": token,
         "user_tz": user["timezone"],
         "is_admin": user["role"] == "admin",
-        "other_books": [dict(row) for row in others],
+        "other_books": with_queue_ends(others),
         "sub_id": None,
         "book_title": None,
     }
@@ -634,6 +656,43 @@ async def update_preferences(
     return RedirectResponse(url=f"/profile?token={token}", status_code=303)
 
 
+@app.post("/queue/move", response_class=HTMLResponse)
+async def move_in_queue(token: str = Form(...), sub_id: int = Form(...),
+                        direction: str = Form(...), conn=Depends(get_db)):
+    """One place up or down. The token in the form is what authorises it."""
+    user = user_from_token(conn, token)
+    if not user:
+        return invalid_link()
+
+    with db.transaction(conn):
+        reading_queue.move(conn, sub_id, user["id"], direction)
+
+    # A book already at the end it was asked to move towards is not an error;
+    # the page simply comes back the same.
+    return RedirectResponse(url="/profile", status_code=303)
+
+
+@app.post("/queue/remove", response_class=HTMLResponse)
+async def remove_from_queue(token: str = Form(...), sub_id: int = Form(...),
+                            conn=Depends(get_db)):
+    """Take a book off the list, keeping where the reader got to."""
+    user = user_from_token(conn, token)
+    if not user:
+        return invalid_link()
+
+    with db.transaction(conn):
+        gone = reading_queue.remove(conn, sub_id, user["id"])
+        if gone:
+            events.record(conn, "unsubscribed", subscription_id=gone["id"],
+                          book_id=gone["book_id"], sequence=gone["current_sequence"],
+                          status=gone["status"])
+
+    if not gone:
+        return invalid_link("That book is not on your list")
+
+    return RedirectResponse(url="/profile", status_code=303)
+
+
 @app.get("/switch_book", response_class=HTMLResponse)
 async def switch_book(token: str, new_book_id: str, conn=Depends(get_db)):
     """Make this book the one arriving now. Used by the queue and the
@@ -654,10 +713,14 @@ async def switch_book(token: str, new_book_id: str, conn=Depends(get_db)):
             (user["id"],),
         ).fetchall()
 
+        # To the front, not the back: the book you just put down to start
+        # another is the one you are most likely to want back first. It can be
+        # moved from the dashboard either way.
+        front = reading_queue.front_position(conn, user["id"])
         conn.execute(
-            """UPDATE subscriptions SET status = 'queued'
+            """UPDATE subscriptions SET status = 'queued', queue_position = ?
                WHERE user_id = ? AND status IN ('active', 'paused')""",
-            (user["id"],),
+            (front, user["id"]),
         )
 
         for aside in stepping_aside:
@@ -722,9 +785,8 @@ async def queue_book(token: str = Form(...), book_id: str = Form(...),
     if book_id in book_states(conn, user["id"]):
         return RedirectResponse(url=f"/library?already={book_id}", status_code=303)
 
-    # A reader's first book starts arriving; anything after it waits its turn.
-    # Same rule as /signup, and the queue is ordered by created_at, so clicking
-    # these in the order you want them is enough.
+    # A reader's first book starts arriving; anything after it waits its turn,
+    # at the back of the queue. The order is theirs to change from there.
     active_count = conn.execute(
         "SELECT COUNT(*) FROM subscriptions WHERE user_id = ? AND status = 'active'",
         (user["id"],),
@@ -732,15 +794,27 @@ async def queue_book(token: str = Form(...), book_id: str = Form(...),
     status = "active" if active_count == 0 else "queued"
 
     with db.transaction(conn):
-        cur = conn.execute(
-            """INSERT INTO subscriptions
-                   (user_id, book_id, status, current_sequence, chunks_per_day,
-                    delivery_hour, last_sent, created_at)
-               VALUES (?, ?, ?, 1, 2, ?, NULL, ?)""",
-            (user["id"], book_id, status, dispatch.TARGET_HOUR, utc_now()),
-        )
-        events.record(conn, "subscribed", subscription_id=cur.lastrowid,
-                      book_id=book_id, sequence=1, status=status, trigger="library")
+        # A book taken off the list before comes back where it left off rather
+        # than as a second subscription starting at part one.
+        revived = reading_queue.revive(conn, user["id"], book_id, status)
+        if revived:
+            sub_id, sequence = revived["id"], revived["current_sequence"]
+        else:
+            position = (reading_queue.back_position(conn, user["id"])
+                        if status == "queued" else None)
+            sub_id = conn.execute(
+                """INSERT INTO subscriptions
+                       (user_id, book_id, status, current_sequence, chunks_per_day,
+                        delivery_hour, queue_position, last_sent, created_at)
+                   VALUES (?, ?, ?, 1, 2, ?, ?, NULL, ?)""",
+                (user["id"], book_id, status, dispatch.TARGET_HOUR, position,
+                 utc_now()),
+            ).lastrowid
+            sequence = 1
+
+        events.record(conn, "subscribed", subscription_id=sub_id,
+                      book_id=book_id, sequence=sequence, status=status,
+                      trigger="library")
 
     outcome = "started" if status == "active" else "queued"
     return RedirectResponse(url=f"/library?{outcome}={book_id}", status_code=303)

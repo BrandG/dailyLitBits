@@ -399,19 +399,31 @@ def send_victory(conn, sub, book, email, dry_run=False):
             print("   [Victory] No AI picks; falling back to a random three.")
             suggestions = [dict(row) for row in random.sample(available, min(3, len(available)))]
 
-    # Promote whatever they queued next.
+    # Promote whatever they queued next - in the order they put it in, not
+    # the order it happened to be added.
     next_sub = conn.execute(
         """SELECT * FROM subscriptions WHERE user_id = ? AND status = 'queued'
-           ORDER BY created_at LIMIT 1""", (sub["user_id"],)).fetchone()
+           ORDER BY queue_position, created_at LIMIT 1""",
+        (sub["user_id"],)).fetchone()
 
     next_title = None
     if next_sub:
+        # current_sequence is left alone. It used to be reset to 1 here, which
+        # silently restarted any book that had been read partway and set aside
+        # - switch_book keeps a book's place, and then finishing another book
+        # threw it away. A book never started is already at 1.
+        #
+        # created_at is still rewritten, because elsewhere it means "when did
+        # this book start arriving" - that is what the dashboard shows and
+        # what the victory email counts days from.
         conn.execute(
             """UPDATE subscriptions
-               SET status = 'active', current_sequence = 1, created_at = ?, last_sent = NULL
+               SET status = 'active', created_at = ?, last_sent = NULL,
+                   queue_position = NULL
                WHERE id = ?""", (utc_now(), next_sub["id"]))
         events.record(conn, "resumed", subscription_id=next_sub["id"],
-                      book_id=next_sub["book_id"], sequence=1)
+                      book_id=next_sub["book_id"],
+                      sequence=next_sub["current_sequence"])
         row = conn.execute("SELECT title FROM books WHERE id = ?",
                            (next_sub["book_id"],)).fetchone()
         next_title = row["title"] if row else None

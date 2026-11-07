@@ -715,3 +715,50 @@ a:hover {
     /* Three long numbers do not fit a phone; two do. */
     .stat-grid.cols-3 { grid-template-columns: repeat(2, 1fr); }
 }
+
+/* --- The queue on the dashboard ---------------------------------------- */
+
+.queue-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    /* Not wrap: a long title would otherwise push its own buttons onto the
+       next line while a short one kept them, and the rows stopped lining up. */
+    flex-wrap: nowrap;
+    margin-bottom: 1rem;
+    padding-bottom: 1rem;
+    border-bottom: 1px solid var(--dlb-border);
+}
+
+.queue-item:last-child { border-bottom: 0; margin-bottom: 0; padding-bottom: 0; }
+
+.queue-book { min-width: 0; flex: 1 1 auto; }
+
+.queue-actions {
+    display: flex;
+    align-items: center;
+    gap: .4rem;
+    flex: 0 0 auto;
+}
+
+/* Square, so two of them read as a pair of arrows rather than two words. */
+.queue-arrow {
+    width: 2rem;
+    padding-left: 0;
+    padding-right: 0;
+    line-height: 1;
+}
+
+/* Disabled at the ends of the queue: still there, so the row does not
+   reflow as books move past it, but visibly doing nothing. */
+.queue-arrow:disabled { opacity: .35; cursor: default; }
+
+.queue-remove { color: var(--dlb-ink-muted); }
+.queue-remove:hover { color: #c0553f; border-color: #c0553f; }
+
+@media (max-width: 575.98px) {
+    /* On a phone the actions drop under the title rather than squeezing it. */
+    .queue-item { flex-direction: column; align-items: flex-start; gap: .6rem; }
+    .queue-actions { flex-wrap: wrap; }
+}

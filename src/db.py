@@ -42,10 +42,40 @@ def connect(db_path=None):
     return conn
 
 
+def add_missing_columns(conn):
+    """The one schema change CREATE TABLE IF NOT EXISTS cannot make.
+
+    schema.sql describes the table a fresh install gets. A database that
+    already exists keeps the columns it already had, so a new one has to be
+    added here, guarded by what the table actually holds. Every branch is a
+    no-op the second time, which is what lets init_db run on every connection.
+    """
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(subscriptions)")}
+
+    if "queue_position" not in columns:
+        conn.execute("ALTER TABLE subscriptions ADD COLUMN queue_position INTEGER")
+        # Existing queues keep the order they were already being shown in,
+        # which was the order the books were added.
+        conn.execute(
+            """UPDATE subscriptions
+               SET queue_position = (
+                   SELECT COUNT(*) FROM subscriptions AS earlier
+                   WHERE earlier.user_id = subscriptions.user_id
+                     AND earlier.status = 'queued'
+                     AND (earlier.created_at, earlier.id)
+                         <= (subscriptions.created_at, subscriptions.id))
+               WHERE status = 'queued'"""
+        )
+
+    return conn
+
+
 def init_db(conn):
-    """Applies schema.sql. Idempotent, so it is safe on every connection."""
+    """Applies schema.sql, then the changes it cannot make. Idempotent, so it
+    is safe on every connection."""
     with open(SCHEMA_PATH) as f:
         conn.executescript(f.read())
+    add_missing_columns(conn)
     return conn
 
 

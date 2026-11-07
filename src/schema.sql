@@ -65,6 +65,11 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     delivery_hour    INTEGER NOT NULL DEFAULT 6
                      CHECK (delivery_hour BETWEEN 0 AND 23),
     last_sent        TEXT,
+    -- The reader's own order for the books waiting their turn. NULL for every
+    -- status but 'queued': nothing else is in a line. Deliberately not
+    -- created_at, which dispatch rewrites when it promotes a book and which
+    -- therefore means "when did this start arriving", not "where is it".
+    queue_position   INTEGER,
     created_at       TEXT    NOT NULL
 );
 
