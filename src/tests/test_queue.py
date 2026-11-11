@@ -273,8 +273,9 @@ def test_the_dashboard_blunts_the_arrows_at_the_ends(client, conn, reader):
     page = client.get(f"/profile?token={security.generate_dashboard_token(user_id)}").text
 
     # Two books, so exactly two arrows do nothing: the first one's up and the
-    # last one's down.
-    assert page.count("disabled") == 2
+    # last one's down. Counted as the rendered attribute, because the drag
+    # script names .disabled too.
+    assert page.count("disabled>") == 2
 
 
 # --- the column itself ---
@@ -287,3 +288,148 @@ def test_adding_the_column_again_is_harmless(conn):
 
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(subscriptions)")}
     assert "queue_position" in columns
+
+# --- a whole order at once (what a drag sends) ---
+
+def test_reorder_writes_the_order_it_was_given(conn, reader):
+    user_id, _ = reader
+    first = add_queued(conn, user_id, "pgone", "First", position=1)
+    second = add_queued(conn, user_id, "pgtwo", "Second", position=2)
+    third = add_queued(conn, user_id, "pgthree", "Third", position=3)
+
+    assert reading_queue.reorder(conn, user_id, [third, first, second])
+
+    assert order(conn, user_id) == [third, first, second]
+    assert [row["queue_position"] for row in reading_queue.queued(conn, user_id)] == [1, 2, 3]
+
+
+def test_reorder_refuses_a_list_with_a_book_missing(conn, reader):
+    """Half an order is not an order: the row left out keeps a position that
+    now means nothing."""
+    user_id, _ = reader
+    first = add_queued(conn, user_id, "pgone", "First", position=1)
+    second = add_queued(conn, user_id, "pgtwo", "Second", position=2)
+    third = add_queued(conn, user_id, "pgthree", "Third", position=3)
+
+    assert reading_queue.reorder(conn, user_id, [second, first]) is False
+
+    assert order(conn, user_id) == [first, second, third]
+
+
+def test_reorder_refuses_a_repeated_book(conn, reader):
+    user_id, _ = reader
+    first = add_queued(conn, user_id, "pgone", "First", position=1)
+    second = add_queued(conn, user_id, "pgtwo", "Second", position=2)
+
+    assert reading_queue.reorder(conn, user_id, [first, first]) is False
+    assert order(conn, user_id) == [first, second]
+
+
+def test_reorder_refuses_someone_elses_book(conn, reader):
+    user_id, _ = reader
+    mine = add_queued(conn, user_id, "pgone", "First", position=1)
+    stranger, _ = UserManager(conn).get_or_create_user("stranger@example.com")
+    theirs = add_queued(conn, stranger, "pgtwo", "Theirs", position=1)
+
+    assert reading_queue.reorder(conn, user_id, [theirs, mine]) is False
+    assert order(conn, user_id) == [mine]
+    assert order(conn, stranger) == [theirs]
+
+
+def test_reorder_refuses_a_paused_book_in_the_list(conn, reader):
+    """A paused book is not in the queue, so it has no position to take."""
+    user_id, _ = reader
+    queued_sub = add_queued(conn, user_id, "pgone", "First", position=1)
+    paused = add_queued(conn, user_id, "pgtwo", "Paused", position=2)
+    conn.execute("UPDATE subscriptions SET status = 'paused', queue_position = NULL "
+                 "WHERE id = ?", (paused,))
+
+    assert reading_queue.reorder(conn, user_id, [paused, queued_sub]) is False
+
+
+def test_reorder_accepts_the_order_it_already_has(conn, reader):
+    """A drag that ends where it started is not an error."""
+    user_id, _ = reader
+    first = add_queued(conn, user_id, "pgone", "First", position=1)
+    second = add_queued(conn, user_id, "pgtwo", "Second", position=2)
+
+    assert reading_queue.reorder(conn, user_id, [first, second])
+    assert order(conn, user_id) == [first, second]
+
+
+# --- the route behind the drag ---
+
+def test_the_order_route_saves_and_answers_with_the_new_order(client, conn, reader):
+    user_id, _ = reader
+    first = add_queued(conn, user_id, "pgone", "First", position=1)
+    second = add_queued(conn, user_id, "pgtwo", "Second", position=2)
+
+    response = client.post("/queue/order", data={
+        "token": security.generate_dashboard_token(user_id),
+        "sub_ids": [second, first]})
+
+    assert response.status_code == 200
+    # The page blunts the arrows from this answer, so it has to be the order
+    # the database now holds rather than the one that was posted.
+    assert response.json() == {"sub_ids": [second, first]}
+    assert order(conn, user_id) == [second, first]
+
+
+def test_the_order_route_refuses_a_stale_list(client, conn, reader):
+    """The queue changed in another tab. Reordering what was on screen would
+    apply an order that was never about this list."""
+    user_id, _ = reader
+    first = add_queued(conn, user_id, "pgone", "First", position=1)
+    second = add_queued(conn, user_id, "pgtwo", "Second", position=2)
+    gone = add_queued(conn, user_id, "pgthree", "Removed Elsewhere", position=3)
+    reading_queue.remove(conn, gone, user_id)
+
+    response = client.post("/queue/order", data={
+        "token": security.generate_dashboard_token(user_id),
+        "sub_ids": [gone, second, first]})
+
+    assert response.status_code == 409
+    assert order(conn, user_id) == [first, second]
+
+
+def test_the_order_route_refuses_a_token_we_did_not_sign(client, conn, reader):
+    user_id, _ = reader
+    first = add_queued(conn, user_id, "pgone", "First", position=1)
+    second = add_queued(conn, user_id, "pgtwo", "Second", position=2)
+
+    response = client.post("/queue/order", data={
+        "token": "nonsense", "sub_ids": [second, first]})
+
+    assert response.status_code == 400
+    assert order(conn, user_id) == [first, second]
+
+
+# --- what the page carries ---
+
+def test_the_dashboard_offers_a_handle_for_queued_books_only(client, conn, reader):
+    user_id, _ = reader
+    add_queued(conn, user_id, "pgone", "First", position=1)
+    paused = add_queued(conn, user_id, "pgtwo", "Paused", position=2)
+    conn.execute("UPDATE subscriptions SET status = 'paused', queue_position = NULL "
+                 "WHERE id = ?", (paused,))
+
+    page = client.get(f"/profile?token={security.generate_dashboard_token(user_id)}").text
+
+    assert page.count('class="queue-grip"') == 1, \
+        "the paused book has nowhere to move"
+    assert 'id="queueList"' in page
+    assert "sortable-1.15.6.min.js" in page
+
+
+def test_the_dashboard_hides_the_drag_hint_until_the_script_runs(client, conn, reader):
+    """The handle and the sentence describing it both start hidden, so a
+    browser that never runs the script is not promised something it cannot do."""
+    user_id, _ = reader
+    add_queued(conn, user_id, "pgone", "First", position=1)
+
+    page = client.get(f"/profile?token={security.generate_dashboard_token(user_id)}").text
+
+    assert 'id="dragHint" hidden' in page
+    # The class that reveals the handles is not in the markup the server
+    # sends; the script adds it, and only if Sortable really loaded.
+    assert '<div class="queue-list" id="queueList"' in page

@@ -754,11 +754,48 @@ a:hover {
    reflow as books move past it, but visibly doing nothing. */
 .queue-arrow:disabled { opacity: .35; cursor: default; }
 
+/* The handle. Hidden until the script adds .queue-dnd, so a reader whose
+   browser never ran it is not offered something that cannot work. */
+.queue-grip {
+    display: none;
+    flex: 0 0 auto;
+    align-self: center;
+    margin-left: -.25rem;
+    padding: .25rem .4rem;
+    color: var(--dlb-ink-muted);
+    font-size: 1.1rem;
+    line-height: 1;
+    cursor: grab;
+    user-select: none;
+    /* Only the handle swallows a touch-drag. Press and move anywhere else on
+       the row and the page scrolls, which on a phone is what a long list is
+       mostly for. */
+    touch-action: none;
+}
+
+.queue-dnd .queue-grip { display: inline-flex; }
+.queue-grip:hover { color: var(--dlb-ink); }
+.queue-grip:active { cursor: grabbing; }
+
+/* The row under the cursor, and the gap it came from. */
+.queue-item-chosen { background: var(--dlb-accent-soft); border-radius: .4rem; }
+.queue-item-ghost { opacity: .35; }
+
+/* Says what just moved. No room taken when there is nothing to say. */
+.queue-status { margin: .75rem 0 0; color: var(--dlb-ink-muted); }
+.queue-status:empty { display: none; }
+
 .queue-remove { color: var(--dlb-ink-muted); }
 .queue-remove:hover { color: #c0553f; border-color: #c0553f; }
 
 @media (max-width: 575.98px) {
-    /* On a phone the actions drop under the title rather than squeezing it. */
-    .queue-item { flex-direction: column; align-items: flex-start; gap: .6rem; }
-    .queue-actions { flex-wrap: wrap; }
+    /* On a phone the actions drop under the title rather than squeezing it.
+       Wrapping rather than stacking, so the handle stays beside the title it
+       belongs to instead of sitting above it on a line of its own. */
+    .queue-item { flex-wrap: wrap; gap: .5rem .6rem; }
+    .queue-book { flex: 1 1 60%; }
+    .queue-actions { flex: 1 1 100%; flex-wrap: wrap; }
+    /* A thumb needs more than a glyph's worth of room. The padding grows
+       rather than the mark, so the row does not get taller. */
+    .queue-grip { padding: .6rem .5rem; font-size: 1.25rem; }
 }

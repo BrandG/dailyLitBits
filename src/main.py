@@ -14,7 +14,7 @@ from logger import log
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, Request, Form, Depends
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -670,6 +670,36 @@ async def move_in_queue(token: str = Form(...), sub_id: int = Form(...),
     # A book already at the end it was asked to move towards is not an error;
     # the page simply comes back the same.
     return RedirectResponse(url="/profile", status_code=303)
+
+
+@app.post("/queue/order")
+async def set_queue_order(token: str = Form(...), sub_ids: list[int] = Form(...),
+                          conn=Depends(get_db)):
+    """A whole new order at once, which is what dragging a book produces.
+
+    This one answers the page instead of redirecting it, because the drag has
+    already moved the row on screen - a redirect would only make it flicker.
+    The reply carries the order the database now holds, and the page uses that
+    to blunt the arrows at the new ends. So where the ends of the queue are is
+    still decided in exactly one place: here.
+    """
+    user = user_from_token(conn, token)
+    if not user:
+        return JSONResponse({"error": "That link is no longer valid."},
+                            status_code=400)
+
+    with db.transaction(conn):
+        written = reading_queue.reorder(conn, user["id"], sub_ids)
+
+    if not written:
+        # The page is looking at a queue that has since changed - a book
+        # removed in another tab, or one promoted overnight. Refusing and
+        # reloading beats applying an order that was never about this list.
+        return JSONResponse({"error": "That list has changed since it loaded."},
+                            status_code=409)
+
+    return JSONResponse(
+        {"sub_ids": [row["id"] for row in reading_queue.queued(conn, user["id"])]})
 
 
 @app.post("/queue/remove", response_class=HTMLResponse)

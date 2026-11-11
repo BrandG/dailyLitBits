@@ -54,60 +54,82 @@
                     <div class="card-header">Your other books</div>
                     <div class="card-body">
                         <p class="text-muted small mb-3">
-                            They arrive in this order, top first. Starting or resuming one
-                            moves your current book to the front of the queue &mdash; it keeps
-                            its place either way, and so does anything you remove.
+                            They arrive in this order, top first.<span id="dragHint" hidden>
+                                Drag a book by its handle to move it, or use the arrows.</span>
+                            Starting or resuming one moves your current book to the front of
+                            the queue &mdash; it keeps its place either way, and so does
+                            anything you remove.
                         </p>
-                        {% for book in other_books %}
-                        <div class="queue-item">
-                            <div class="queue-book">
-                                <strong class="d-block">{{ book.title }}</strong>
-                                <span class="text-muted small">by {{ book.author }}</span>
-                                {% if book.status == 'paused' %}
-                                <span class="badge bg-warning text-dark ms-1">Paused</span>
-                                <span class="text-muted small">at part {{ book.current_sequence }}
-                                    of {{ book.total_chunks }}</span>
-                                {% else %}
-                                <span class="badge bg-secondary ms-1">Queued</span>
-                                {% endif %}
-                            </div>
-
-                            <div class="queue-actions">
-                                {# Only queued books are in a line. A paused one is set
-                                   aside, not waiting its turn, so it has no place to move. #}
+                        <div class="queue-list" id="queueList" data-token="{{ token }}">
+                            {% for book in other_books %}
+                            <div class="queue-item {{ 'is-paused' if book.status == 'paused' else 'is-queued' }}"
+                                data-sub-id="{{ book.subscription_id }}">
+                                {# The handle is hidden until the script says dragging works.
+                                   A gripper that cannot be gripped is worse than none. #}
                                 {% if book.status == 'queued' %}
-                                <form action="/queue/move" method="post" class="m-0">
-                                    <input type="hidden" name="token" value="{{ token }}">
-                                    <input type="hidden" name="sub_id" value="{{ book.subscription_id }}">
-                                    <input type="hidden" name="direction" value="up">
-                                    <button type="submit" class="btn btn-quiet btn-sm queue-arrow"
-                                        aria-label="Move {{ book.title }} up the queue" {% if
-                                        book.first_in_queue %}disabled{% endif %}>&uarr;</button>
-                                </form>
-                                <form action="/queue/move" method="post" class="m-0">
-                                    <input type="hidden" name="token" value="{{ token }}">
-                                    <input type="hidden" name="sub_id" value="{{ book.subscription_id }}">
-                                    <input type="hidden" name="direction" value="down">
-                                    <button type="submit" class="btn btn-quiet btn-sm queue-arrow"
-                                        aria-label="Move {{ book.title }} down the queue" {% if
-                                        book.last_in_queue %}disabled{% endif %}>&darr;</button>
-                                </form>
+                                <span class="queue-grip" aria-hidden="true"
+                                    title="Drag to move this book">&#x283F;</span>
                                 {% endif %}
 
-                                <a href="/switch_book?token={{ token }}&new_book_id={{ book.book_id }}"
-                                    class="btn btn-sm {{ 'btn-primary' if book.status == 'paused' else 'btn-outline-primary' }}">
-                                    {{ 'Resume' if book.status == 'paused' else 'Start reading' }}
-                                </a>
+                                <div class="queue-book">
+                                    <strong class="queue-title d-block">{{ book.title }}</strong>
+                                    <span class="text-muted small">by {{ book.author }}</span>
+                                    {% if book.status == 'paused' %}
+                                    <span class="badge bg-warning text-dark ms-1">Paused</span>
+                                    <span class="text-muted small">at part {{ book.current_sequence }}
+                                        of {{ book.total_chunks }}</span>
+                                    {% else %}
+                                    <span class="badge bg-secondary ms-1">Queued</span>
+                                    {% endif %}
+                                </div>
 
-                                <form action="/queue/remove" method="post" class="m-0">
-                                    <input type="hidden" name="token" value="{{ token }}">
-                                    <input type="hidden" name="sub_id" value="{{ book.subscription_id }}">
-                                    <button type="submit" class="btn btn-quiet btn-sm queue-remove"
-                                        aria-label="Remove {{ book.title }} from your list">Remove</button>
-                                </form>
+                                <div class="queue-actions">
+                                    {# Only queued books are in a line. A paused one is set
+                                       aside, not waiting its turn, so it has no place to move.
+                                       The arrows stay whatever the script does: they are the
+                                       keyboard path, and the one that works without any. #}
+                                    {% if book.status == 'queued' %}
+                                    <form action="/queue/move" method="post" class="m-0">
+                                        <input type="hidden" name="token" value="{{ token }}">
+                                        <input type="hidden" name="sub_id" value="{{ book.subscription_id }}">
+                                        <input type="hidden" name="direction" value="up">
+                                        <button type="submit" class="btn btn-quiet btn-sm queue-arrow"
+                                            data-direction="up"
+                                            aria-label="Move {{ book.title }} up the queue" {% if
+                                            book.first_in_queue %}disabled{% endif %}>&uarr;</button>
+                                    </form>
+                                    <form action="/queue/move" method="post" class="m-0">
+                                        <input type="hidden" name="token" value="{{ token }}">
+                                        <input type="hidden" name="sub_id" value="{{ book.subscription_id }}">
+                                        <input type="hidden" name="direction" value="down">
+                                        <button type="submit" class="btn btn-quiet btn-sm queue-arrow"
+                                            data-direction="down"
+                                            aria-label="Move {{ book.title }} down the queue" {% if
+                                            book.last_in_queue %}disabled{% endif %}>&darr;</button>
+                                    </form>
+                                    {% endif %}
+
+                                    <a href="/switch_book?token={{ token }}&new_book_id={{ book.book_id }}"
+                                        class="btn btn-sm {{ 'btn-primary' if book.status == 'paused' else 'btn-outline-primary' }}">
+                                        {{ 'Resume' if book.status == 'paused' else 'Start reading' }}
+                                    </a>
+
+                                    <form action="/queue/remove" method="post" class="m-0">
+                                        <input type="hidden" name="token" value="{{ token }}">
+                                        <input type="hidden" name="sub_id" value="{{ book.subscription_id }}">
+                                        <button type="submit" class="btn btn-quiet btn-sm queue-remove"
+                                            aria-label="Remove {{ book.title }} from your list">Remove</button>
+                                    </form>
+                                </div>
                             </div>
+                            {% endfor %}
                         </div>
-                        {% endfor %}
+
+                        {# Says what just happened, out loud for a screen reader and on
+                           screen for everyone - a drag that failed to save must not look
+                           like one that worked. Empty, it takes up no room. #}
+                        <p class="queue-status small" id="queueStatus" role="status"
+                            aria-live="polite"></p>
                     </div>
                 </div>
                 {% endif %}
@@ -209,6 +231,115 @@
 
         {% include 'footer.html' %}
     </div>
+    <script src="/static/js/sortable-1.15.6.min.js"></script>
+    <script>
+        // Dragging the queue into order. An addition, never the only way: the
+        // arrows are the keyboard path and the one that survives this file
+        // failing to load, so nothing below runs unless Sortable is really here.
+        //
+        // Sortable 1.15.6, served from this host rather than a CDN so that a
+        // reader's queue does not depend on someone else's uptime, and so the
+        // page asks nothing of a third party. sha256 of the file matches npm's
+        // published hash: bQqDH8GbS66FF5etM5MVfoYa+3hiRZwRImNZsn4sQzc=
+        (function () {
+            const list = document.getElementById('queueList');
+            if (!list || typeof Sortable === 'undefined') return;
+
+            const status = document.getElementById('queueStatus');
+            const hint = document.getElementById('dragHint');
+            const token = list.dataset.token;
+
+            list.classList.add('queue-dnd');   // what reveals the handles
+            if (hint) hint.hidden = false;
+
+            const rows = () => Array.from(list.querySelectorAll('.queue-item.is-queued'));
+            const order = () => rows().map(row => row.dataset.subId);
+
+            function say(message) {
+                if (status) status.textContent = message;
+            }
+
+            // The server says where the ends of the queue are; this only
+            // applies the answer. Re-deciding it here would be the same rule
+            // written twice, in two languages, free to disagree.
+            function bluntTheEnds(saved) {
+                const byId = new Map(rows().map(row => [row.dataset.subId, row]));
+                saved.forEach((subId, index) => {
+                    const row = byId.get(String(subId));
+                    if (!row) return;
+                    const up = row.querySelector('.queue-arrow[data-direction="up"]');
+                    const down = row.querySelector('.queue-arrow[data-direction="down"]');
+                    if (up) up.disabled = index === 0;
+                    if (down) down.disabled = index === saved.length - 1;
+                });
+            }
+
+            // Paused books sort above the queue and stay put, so putting each
+            // queued row back at the end in its old order restores exactly
+            // what was there.
+            function putBack(previous) {
+                const byId = new Map(rows().map(row => [row.dataset.subId, row]));
+                previous.forEach(subId => {
+                    const row = byId.get(subId);
+                    if (row) list.appendChild(row);
+                });
+            }
+
+            async function save(previous) {
+                const body = new FormData();
+                body.append('token', token);
+                order().forEach(subId => body.append('sub_ids', subId));
+
+                try {
+                    const response = await fetch('/queue/order',
+                        { method: 'POST', body: body });
+
+                    if (response.status === 409) {
+                        say('Your list changed somewhere else. Reloading it\u2026');
+                        window.location.reload();
+                        return;
+                    }
+                    if (!response.ok) throw new Error('HTTP ' + response.status);
+
+                    const saved = await response.json();
+                    bluntTheEnds(saved.sub_ids.map(String));
+                } catch (e) {
+                    // The row has already moved on screen. Leaving it there
+                    // would show an order the database never received, so it
+                    // goes back and says so.
+                    putBack(previous);
+                    say('Could not save that order \u2014 nothing has moved.');
+                }
+            }
+
+            let before = [];
+
+            Sortable.create(list, {
+                handle: '.queue-grip',
+                draggable: '.queue-item',
+                animation: 150,
+                chosenClass: 'queue-item-chosen',
+                ghostClass: 'queue-item-ghost',
+                // A queue of twenty does not fit a screen, so dragging past
+                // the edge has to carry the page with it.
+                scroll: true,
+                scrollSensitivity: 80,
+                scrollSpeed: 12,
+                // A paused book is not in the line, so nothing may be dropped
+                // across it. It has no handle either, so it cannot be lifted.
+                onMove: evt => !evt.related.classList.contains('is-paused'),
+                onStart: () => { before = order(); },
+                onEnd: evt => {
+                    if (evt.oldIndex === evt.newIndex) return;
+                    const now = order();
+                    const title = evt.item.querySelector('.queue-title').textContent.trim();
+                    say('Moved ' + title + ' to ' +
+                        (now.indexOf(evt.item.dataset.subId) + 1) + ' of ' + now.length + '.');
+                    save(before);
+                },
+            });
+        })();
+    </script>
 </body>
 
 </html>

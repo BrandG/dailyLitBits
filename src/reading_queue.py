@@ -62,6 +62,29 @@ def renumber(conn, ordered_ids):
         )
 
 
+def reorder(conn, user_id, ordered_ids):
+    """Write a whole new order for a queue. True if it was written.
+
+    The list has to be exactly the queue the reader is looking at: the same
+    rows, none missing, none repeated, nothing from anywhere else. Anything
+    else is refused outright rather than partly applied.
+
+    That strictness is the point. A list missing a row would leave that row's
+    position untouched and the resulting order ambiguous; a list holding an id
+    this reader does not own is either a page looking at a queue that has
+    since changed, or someone trying their luck. Neither should be guessed at.
+    """
+    current = [row["id"] for row in queued(conn, user_id)]
+
+    # Sorted comparison catches all four refusals at once: a missing row, a
+    # repeated one, an extra one, and an id belonging to somebody else.
+    if sorted(ordered_ids) != sorted(current):
+        return False
+
+    renumber(conn, ordered_ids)
+    return True
+
+
 def move(conn, sub_id, user_id, direction):
     """Swap a queued book with its neighbour. True if anything moved.
 
