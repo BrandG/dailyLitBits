@@ -94,3 +94,11 @@ def reader(conn, book):
         (user_id, book),
     )
     return user_id, cur.lastrowid
+
+
+@pytest.fixture(autouse=True)
+def service_open(monkeypatch):
+    """Tests create users 'now', which the containment hold would catch."""
+    import config
+    monkeypatch.setattr(config, "SIGNUPS_OPEN", True)
+    monkeypatch.setattr(config, "DELIVERY_HOLD_SINCE", "")

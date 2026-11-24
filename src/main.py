@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 import config
+import html
 import db
 import dispatch
 import events
@@ -422,6 +423,12 @@ async def handle_signup(
     chunks_per_day: int = Form(2),
     conn=Depends(get_db),
 ):
+    if not config.SIGNUPS_OPEN:
+        return templates.TemplateResponse("index.html", {
+            "request": request, "signed_in": signed_in(request), "books": book_choices(conn), "recent": recent_books(conn),
+            "message": "New signups are paused for a few days while we improve the service. Please check back soon.",
+        })
+
     book = conn.execute("SELECT id, title FROM books WHERE id = ?", (book_id,)).fetchone()
     if not book:
         return templates.TemplateResponse("index.html", {
@@ -723,8 +730,34 @@ async def remove_from_queue(token: str = Form(...), sub_id: int = Form(...),
     return RedirectResponse(url="/profile", status_code=303)
 
 
+def confirm_page(heading, question, action, fields, button):
+    """A GET from an email link only asks; the button POSTs. Mail scanners
+    follow links but do not submit forms, so they can no longer act."""
+    hidden = "".join(
+        f'<input type="hidden" name="{name}" value="{html.escape(str(value), quote=True)}">'
+        for name, value in fields.items())
+    return simple_page(heading, f"""
+        <p style="font-size: 18px;">{question}</p>
+        <form action="{action}" method="post">{hidden}
+            <button type="submit" style="background-color: #1f6b4f; color: white; padding: 10px 20px; border: none; border-radius: 5px; font-size: 16px; cursor: pointer;">{button}</button>
+        </form>""")
+
+
 @app.get("/switch_book", response_class=HTMLResponse)
-async def switch_book(token: str, new_book_id: str, conn=Depends(get_db)):
+async def switch_book_confirm(token: str, new_book_id: str, conn=Depends(get_db)):
+    if not user_from_token(conn, token):
+        return invalid_link()
+    book = conn.execute("SELECT id, title FROM books WHERE id = ?", (new_book_id,)).fetchone()
+    if not book:
+        return HTMLResponse("<h1>Book not found</h1>", status_code=404)
+    return confirm_page("Switch books?",
+                        f"Start reading <strong>{html.escape(book['title'])}</strong> now?",
+                        "/switch_book", {"token": token, "new_book_id": new_book_id},
+                        "Yes, switch")
+
+
+@app.post("/switch_book", response_class=HTMLResponse)
+async def switch_book(token: str = Form(...), new_book_id: str = Form(...), conn=Depends(get_db)):
     """Make this book the one arriving now. Used by the queue and the
     suggestions in the victory email."""
     user = user_from_token(conn, token)
@@ -853,7 +886,15 @@ async def queue_book(token: str = Form(...), book_id: str = Form(...),
 # --- EMAIL LINKS (scoped to one subscription) ---
 
 @app.get("/next", response_class=HTMLResponse)
-async def trigger_next_chapter(token: str, conn=Depends(get_db)):
+async def next_chapter_confirm(token: str):
+    if not verify_next_token(token):
+        return invalid_link()
+    return confirm_page("Next part?", "Send the next part of your book now?",
+                        "/next", {"token": token}, "Send it now")
+
+
+@app.post("/next", response_class=HTMLResponse)
+async def trigger_next_chapter(token: str = Form(...), conn=Depends(get_db)):
     sub_id = verify_next_token(token)
     if not sub_id:
         return invalid_link()

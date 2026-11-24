@@ -278,6 +278,15 @@ def process_subscription(sub_id, trigger="cron", conn=None, dry_run=False):
         if not user:
             return False, "User not found"
 
+        # Containment hold (see config.DELIVERY_HOLD_SINCE). Keyed on the user's
+        # creation time, not the subscription's: a queued book that starts gets
+        # a fresh subscriptions.created_at.
+        if config.DELIVERY_HOLD_SINCE:
+            joined = conn.execute("SELECT created_at FROM users WHERE id = ?",
+                                  (sub["user_id"],)).fetchone()
+            if joined and (joined["created_at"] or "") >= config.DELIVERY_HOLD_SINCE:
+                return False, "Held: account created during the signup flood"
+
         if trigger == "next":
             last_sent = parse_ts(sub["last_sent"])
             if last_sent:

@@ -178,8 +178,8 @@ def test_switch_book_sets_the_new_book_reading_and_queues_the_old(client, conn, 
         """INSERT INTO books (id, title, author, total_chunks, total_words, created_at)
            VALUES ('pgtwo', 'Second Book', 'Author', 4, 1200, '2026-01-01T00:00:00+00:00')""")
 
-    response = client.get(
-        f"/switch_book?token={security.generate_dashboard_token(user_id)}&new_book_id=pgtwo")
+    response = client.post("/switch_book", data={
+        "token": security.generate_dashboard_token(user_id), "new_book_id": "pgtwo"})
 
     assert response.status_code == 200
     assert "Second Book" in response.text
@@ -193,7 +193,7 @@ def test_switch_book_sets_the_new_book_reading_and_queues_the_old(client, conn, 
 
 def test_next_link_sends_the_next_part(client, conn, reader, sent):
     _, sub_id = reader
-    response = client.get(f"/next?token={security.generate_next_token(sub_id)}")
+    response = client.post("/next", data={"token": security.generate_next_token(sub_id)})
 
     assert response.status_code == 200
     assert "On its way" in response.text
@@ -306,9 +306,8 @@ def test_resuming_a_paused_book_keeps_its_place_and_queues_the_active_one(client
     user_id, active_sub = reader
     paused_sub = _add_paused_book(conn, user_id)
 
-    response = client.get(
-        f"/switch_book?token={security.generate_dashboard_token(user_id)}"
-        f"&new_book_id=pgpaused")
+    response = client.post("/switch_book", data={
+        "token": security.generate_dashboard_token(user_id), "new_book_id": "pgpaused"})
     assert response.status_code == 200
 
     resumed = conn.execute("SELECT * FROM subscriptions WHERE id = ?", (paused_sub,)).fetchone()
@@ -537,3 +536,49 @@ def test_queueing_a_book_that_is_not_in_the_library(client, reader):
     response = client.post("/queue_book", data={"token": token, "book_id": "pgnope"})
 
     assert response.status_code == 404
+
+
+
+# --- containment (2026-11-24) ---
+
+def test_next_link_get_only_asks(client, conn, reader, sent):
+    """Mail scanners follow GET links; they must not trigger a send."""
+    _, sub_id = reader
+    response = client.get(f"/next?token={security.generate_next_token(sub_id)}")
+    assert response.status_code == 200
+    assert 'method="post"' in response.text
+    assert sent == []
+
+
+def test_switch_book_get_only_asks(client, conn, reader):
+    user_id, old_sub = reader
+    conn.execute(
+        """INSERT INTO books (id, title, author, total_chunks, total_words, created_at)
+           VALUES ('pgtwo', 'Second Book', 'Author', 4, 1200, '2026-01-01T00:00:00+00:00')""")
+    response = client.get(
+        f"/switch_book?token={security.generate_dashboard_token(user_id)}&new_book_id=pgtwo")
+    assert response.status_code == 200
+    assert 'method="post"' in response.text
+    assert conn.execute("SELECT status FROM subscriptions WHERE id = ?",
+                        (old_sub,)).fetchone()["status"] == "active"
+
+
+def test_closed_signups_create_nothing_and_send_nothing(client, conn, sent, monkeypatch):
+    import config
+    monkeypatch.setattr(config, "SIGNUPS_OPEN", False)
+    book = conn.execute("SELECT id FROM books LIMIT 1").fetchone()
+    response = client.post("/signup", data={"email": "flood@example.com",
+                                             "book_id": book["id"] if book else "pgtest"})
+    assert "paused" in response.text
+    assert conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0
+    assert sent == []
+
+
+def test_hold_blocks_delivery_to_new_accounts(client, conn, reader, sent, monkeypatch):
+    import config
+    import dispatch
+    monkeypatch.setattr(config, "DELIVERY_HOLD_SINCE", "2000-01-01")
+    _, sub_id = reader
+    ok, message = dispatch.process_subscription(sub_id, trigger="next", conn=conn)
+    assert not ok and message.startswith("Held")
+    assert sent == []

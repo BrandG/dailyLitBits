@@ -56,3 +56,15 @@ JEV_MODEL = os.getenv("JEV_MODEL", "jev-1.13.0")
 # A bound on a bug, not a budget: a run costs fractions of a cent, so anything
 # approaching this cap means something is looping.
 JEV_DAILY_USD_CAP = float(os.getenv("JEV_DAILY_USD_CAP", "0.25"))
+
+# --- Containment, 2026-11-24 ---
+# From 2026-11-19 the open signup form took ~1,000 registrations (all for the
+# default book) that look like addresses submitted by someone else: complaints,
+# hard bounces and Gmail spam-filing followed. Until double opt-in and bot
+# protection exist:
+#   SIGNUPS_OPEN=1          re-opens the signup form (default: closed)
+#   DELIVERY_HOLD_SINCE=... holds every delivery to users created on/after this
+#                           UTC timestamp prefix; set it empty to lift the hold.
+# Nothing is deleted; held subscriptions keep their place.
+SIGNUPS_OPEN = os.getenv("SIGNUPS_OPEN", "0") == "1"
+DELIVERY_HOLD_SINCE = os.getenv("DELIVERY_HOLD_SINCE", "2026-11-19")
