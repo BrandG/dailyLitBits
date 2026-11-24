@@ -35,8 +35,8 @@ def test_a_detail_value_shaped_like_an_address_is_refused(conn):
 
 # --- what gets recorded ---
 
-def test_signing_up_is_recorded(client, conn, book, sent):
-    client.post("/signup", data={"email": "new@example.com", "book_id": book})
+def test_signing_up_is_recorded(client, conn, book, sent, sign_up):
+    sign_up("new@example.com", book)
 
     logged = rows(conn)
     assert [row["event"] for row in logged] == ["subscribed"]
@@ -88,11 +88,11 @@ def test_unsubscribing_is_recorded_once(client, conn, reader):
 
 # --- the promise ---
 
-def test_no_event_anywhere_carries_identity(client, conn, book, sent):
+def test_no_event_anywhere_carries_identity(client, conn, book, sent, sign_up):
     """The policy says this log is attached to the subscription, not the
     reader. Walk a whole session and check that stays true."""
     email = "traceable@example.com"
-    client.post("/signup", data={"email": email, "book_id": book})
+    sign_up(email, book)
 
     user = UserManager(conn).get_user_by_email(email)
     sub_id = conn.execute("SELECT id FROM subscriptions WHERE user_id = ?",

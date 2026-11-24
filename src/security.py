@@ -81,3 +81,18 @@ def verify_admin_token(token, max_age=None):
         )
     except BadData:
         return None
+
+
+# --- CONFIRM (double opt-in; identifies a pending signup, expires) ---
+def generate_confirm_token(pending_id):
+    return URLSafeTimedSerializer(config.SECRET_KEY, salt="confirm").dumps(str(pending_id))
+
+
+def verify_confirm_token(token, max_age=None):
+    if max_age is None:
+        max_age = config.CONFIRM_TOKEN_MAX_AGE
+    try:
+        return URLSafeTimedSerializer(config.SECRET_KEY, salt="confirm").loads(
+            token, max_age=max_age)
+    except BadData:
+        return None

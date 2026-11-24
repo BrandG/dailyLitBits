@@ -11,7 +11,7 @@ the templates already use (id AS book_id, blurb AS description) rather than
 churn the templates for a rename.
 """
 from logger import log
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, Request, Form, Depends
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -308,6 +308,29 @@ def recent_books(conn, limit=4):
 
 # --- EMAILS ---
 
+def send_confirmation_email(to_email, book_title, confirm_link):
+    """The only mail an unconfirmed address ever gets. Deliberately plain: no
+    book text, no dashboard link, nothing that works without the click."""
+    title = html.escape(book_title)
+    subject = f"Confirm your dailyLitBits subscription: {book_title}"
+    body = f"""
+    <html>
+    <body style="font-family: sans-serif; padding: 20px; background-color: #ffffff; color: #232019;">
+        <h2 style="color: #2c3e50;">Please confirm your subscription</h2>
+        <p>Someone, hopefully you, asked dailyLitBits to send <strong>{title}</strong>
+        to this address: a few hundred words of the book each morning, by email.</p>
+        <p><a href="{confirm_link}" style="background-color: #1f6b4f; color: white; padding: 10px 15px; text-decoration: none; border-radius: 5px;">Confirm and start my book</a></p>
+        <p style="color: #777; font-size: 12px;">If this wasn't you, ignore this email. Nothing else
+        will be sent, and the request is forgotten after a week. The link works for 48 hours.</p>
+    </body>
+    </html>
+    """
+    if dispatch.send_via_brevo(to_email, subject, body):
+        log("[INFO] Confirmation email sent")
+    else:
+        log("[ERROR] Failed to send confirmation email")
+
+
 def send_welcome_email(to_email, book_title, dashboard_link, is_queue=False):
     if is_queue:
         subject = f"Added to Queue: {book_title}"
@@ -438,69 +461,171 @@ async def handle_signup(
 
     chunks_per_day = max(1, min(chunks_per_day, 12))
     manager = UserManager(conn)
+    lookup = manager.email_lookup(email)
+    now = datetime.now(timezone.utc)
 
-    try:
-        with db.transaction(conn):
-            user_id, _ = manager.get_or_create_user(email, timezone_name=timezone_name)
+    def stamp(moment):
+        return moment.isoformat(timespec="seconds")
 
-            existing = conn.execute(
-                """SELECT status FROM subscriptions
-                   WHERE user_id = ? AND book_id = ?
-                     AND status IN ('active', 'queued', 'paused', 'completed')""",
-                (user_id, book_id),
-            ).fetchone()
-
-            if existing:
-                already = {
-                    "active": f"You are already reading '{book['title']}'.",
-                    "paused": f"'{book['title']}' is paused - resume it from your dashboard.",
-                    "queued": f"'{book['title']}' is already in your queue.",
-                    "completed": f"You have already finished '{book['title']}'.",
-                }[existing["status"]]
-                raise _AlreadySubscribed(already)
-
-            # First book starts now; anything after it waits its turn.
-            active_count = conn.execute(
-                "SELECT COUNT(*) FROM subscriptions WHERE user_id = ? AND status = 'active'",
-                (user_id,),
-            ).fetchone()[0]
-            status = "active" if active_count == 0 else "queued"
-
-            position = (reading_queue.back_position(conn, user_id)
-                        if status == "queued" else None)
-            cur = conn.execute(
-                """INSERT INTO subscriptions
-                       (user_id, book_id, status, current_sequence, chunks_per_day,
-                        delivery_hour, queue_position, last_sent, created_at)
-                   VALUES (?, ?, ?, 1, ?, ?, ?, NULL, ?)""",
-                (user_id, book_id, status, chunks_per_day, dispatch.TARGET_HOUR,
-                 position, utc_now()),
-            )
-            events.record(conn, "subscribed", subscription_id=cur.lastrowid,
-                          book_id=book_id, sequence=1, status=status,
-                          chunks_per_day=chunks_per_day)
-    except _AlreadySubscribed as already:
-        return templates.TemplateResponse("index.html", {
-            "request": request, "signed_in": signed_in(request), "books": book_choices(conn), "recent": recent_books(conn), "message": str(already),
-        })
-    except Exception as exc:
-        log(f"[ERROR] Signup failed: {type(exc).__name__}: {exc}")
+    def page(message):
         return templates.TemplateResponse("index.html", {
             "request": request, "signed_in": signed_in(request), "books": book_choices(conn), "recent": recent_books(conn),
-            "message": "Something went wrong creating your subscription.",
+            "message": message,
         })
 
-    token = security.generate_dashboard_token(user_id)
-    send_welcome_email(email, book["title"], f"{BASE_URL}/profile?token={token}",
-                       is_queue=(status == "queued"))
+    # The same answer whether or not a confirmation actually goes out, so the
+    # form cannot be used to learn which addresses are already readers.
+    check_email = ("Almost there: we've sent a confirmation link to that address. "
+                   "Nothing else will arrive unless it is clicked.")
 
-    message = (f"Added '{book['title']}' to your queue. Check your email."
+    pending_id = None
+    with db.transaction(conn):
+        # Abandoned requests are kept a week, then forgotten.
+        conn.execute(
+            "DELETE FROM pending_signups WHERE confirmed_at IS NULL AND created_at < ?",
+            (stamp(now - timedelta(days=config.PENDING_RETENTION_DAYS)),))
+
+        # One unconfirmed request per address per day, so the form cannot be
+        # used to bury someone in confirmations.
+        waiting = conn.execute(
+            """SELECT 1 FROM pending_signups
+               WHERE email_lookup = ? AND confirmed_at IS NULL AND created_at >= ?""",
+            (lookup, stamp(now - timedelta(hours=24)))).fetchone()
+        if not waiting:
+            recent = conn.execute(
+                "SELECT COUNT(*) FROM pending_signups WHERE created_at >= ?",
+                (stamp(now - timedelta(hours=1)),)).fetchone()[0]
+            if recent >= config.CONFIRM_SENDS_PER_HOUR:
+                log(f"[WARN] Signup refused: {recent} confirmation requests in the last hour")
+                return page("We're getting a lot of signups right now. Please try again in an hour.")
+            pending_id = conn.execute(
+                """INSERT INTO pending_signups
+                       (email_enc, email_lookup, book_id, timezone, chunks_per_day, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (manager.encrypt_email(email), lookup, book_id, timezone_name,
+                 chunks_per_day, stamp(now))).lastrowid
+
+    if pending_id:
+        token = security.generate_confirm_token(pending_id)
+        send_confirmation_email(email, book["title"], f"{BASE_URL}/confirm?token={token}")
+    return page(check_email)
+
+
+def create_subscription(conn, manager, email, book, timezone_name, chunks_per_day):
+    """Makes the reader and the subscription once an address is confirmed.
+    Returns (user_id, status, refusal). refusal is a sentence explaining a
+    duplicate, and in that case nothing was written."""
+    user_id, _ = manager.get_or_create_user(email, timezone_name=timezone_name)
+
+    existing = conn.execute(
+        """SELECT status FROM subscriptions
+           WHERE user_id = ? AND book_id = ?
+             AND status IN ('active', 'queued', 'paused', 'completed')""",
+        (user_id, book["id"]),
+    ).fetchone()
+    if existing:
+        return user_id, None, {
+            "active": f"You are already reading '{book['title']}'.",
+            "paused": f"'{book['title']}' is paused - resume it from your dashboard.",
+            "queued": f"'{book['title']}' is already in your queue.",
+            "completed": f"You have already finished '{book['title']}'.",
+        }[existing["status"]]
+
+    # First book starts now; anything after it waits its turn.
+    active_count = conn.execute(
+        "SELECT COUNT(*) FROM subscriptions WHERE user_id = ? AND status = 'active'",
+        (user_id,),
+    ).fetchone()[0]
+    status = "active" if active_count == 0 else "queued"
+
+    position = (reading_queue.back_position(conn, user_id)
+                if status == "queued" else None)
+    cur = conn.execute(
+        """INSERT INTO subscriptions
+               (user_id, book_id, status, current_sequence, chunks_per_day,
+                delivery_hour, queue_position, last_sent, created_at)
+           VALUES (?, ?, ?, 1, ?, ?, ?, NULL, ?)""",
+        (user_id, book["id"], status, chunks_per_day, dispatch.TARGET_HOUR,
+         position, utc_now()),
+    )
+    events.record(conn, "subscribed", subscription_id=cur.lastrowid,
+                  book_id=book["id"], sequence=1, status=status,
+                  chunks_per_day=chunks_per_day)
+    return user_id, status, None
+
+
+def pending_from_token(conn, token):
+    pending_id = security.verify_confirm_token(token)
+    if not pending_id:
+        return None
+    return conn.execute(
+        """SELECT p.*, b.title FROM pending_signups p JOIN books b ON b.id = p.book_id
+           WHERE p.id = ?""", (int(pending_id),)).fetchone()
+
+
+CONFIRM_LINK_DEAD = "This confirmation link is invalid or has expired. Please sign up again."
+ALREADY_CONFIRMED = ("Already confirmed",
+                     "<p>This address is already confirmed. Your welcome email has the "
+                     "dashboard link for managing your books.</p>")
+
+
+@app.get("/confirm", response_class=HTMLResponse)
+async def confirm_signup_page(token: str, conn=Depends(get_db)):
+    """Only asks. Link scanners follow GETs; a person presses the button."""
+    pending = pending_from_token(conn, token)
+    if not pending:
+        return invalid_link(CONFIRM_LINK_DEAD)
+    if pending["confirmed_at"]:
+        return simple_page(*ALREADY_CONFIRMED)
+    return confirm_page(
+        "Confirm your subscription",
+        f"Start sending <strong>{html.escape(pending['title'])}</strong> to this address, "
+        f"a few hundred words each morning?",
+        "/confirm", {"token": token}, "Yes, start my book")
+
+
+@app.post("/confirm", response_class=HTMLResponse)
+async def confirm_signup(token: str = Form(...), conn=Depends(get_db)):
+    pending = pending_from_token(conn, token)
+    if not pending:
+        return invalid_link(CONFIRM_LINK_DEAD)
+
+    manager = UserManager(conn)
+    email = manager.decrypt_email(pending["email_enc"])
+    book = {"id": pending["book_id"], "title": pending["title"]}
+    user_id = status = refusal = None
+    try:
+        with db.transaction(conn):
+            # The claim and the subscription commit together, so a failure
+            # leaves the link usable rather than half-spent.
+            claimed = conn.execute(
+                "UPDATE pending_signups SET confirmed_at = ? WHERE id = ? AND confirmed_at IS NULL",
+                (utc_now(), pending["id"])).rowcount
+            if claimed:
+                user_id, status, refusal = create_subscription(
+                    conn, manager, email, book, pending["timezone"], pending["chunks_per_day"])
+    except Exception as exc:
+        log(f"[ERROR] Confirmation failed: {type(exc).__name__}: {exc}")
+        return simple_page("Something went wrong",
+                           "<p>We couldn't finish confirming. Please try the link again.</p>",
+                           colour="#dc3545")
+
+    if not claimed:
+        return simple_page(*ALREADY_CONFIRMED)
+    if refusal:
+        return simple_page("Confirmed",
+                           f"<p>Thanks, your address is confirmed.</p><p>{html.escape(refusal)}</p>",
+                           colour="#28a745")
+
+    dashboard = security.generate_dashboard_token(user_id)
+    send_welcome_email(email, book["title"], f"{BASE_URL}/profile?token={dashboard}",
+                       is_queue=(status == "queued"))
+    message = (f"Added '{book['title']}' to your queue. Check your email for your dashboard link."
                if status == "queued" else
                f"Success! '{book['title']}' starts tomorrow. Check your email for your dashboard link.")
-
-    return templates.TemplateResponse("index.html", {
-        "request": request, "signed_in": signed_in(request), "books": book_choices(conn), "recent": recent_books(conn), "message": message,
-    })
+    return simple_page("You're confirmed!",
+                       f"<p style=\"font-size: 18px;\">{html.escape(message)}</p>",
+                       colour="#28a745")
 
 
 class _AlreadySubscribed(Exception):

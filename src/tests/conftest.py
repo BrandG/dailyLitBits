@@ -8,6 +8,7 @@ Nothing here sends email: send_via_brevo is replaced with a recorder, and the
 tests assert against what would have been sent.
 """
 import os
+import re
 import sys
 import tempfile
 
@@ -34,7 +35,8 @@ def conn():
     connection = db.get_db()
     # events first: it references subscriptions, and rows left behind would
     # leak between tests that assert on the exact contents of the log.
-    for table in ("events", "chunks", "subscriptions", "books", "users", "suggestions",
+    for table in ("events", "pending_signups", "chunks", "subscriptions", "books", "users",
+                  "suggestions",
                   "acquisitions"):
         connection.execute(f"DELETE FROM {table}")
     yield connection
@@ -102,3 +104,21 @@ def service_open(monkeypatch):
     import config
     monkeypatch.setattr(config, "SIGNUPS_OPEN", True)
     monkeypatch.setattr(config, "DELIVERY_HOLD_SINCE", "")
+
+
+def confirm_token_from(email_body):
+    match = re.search(r"/confirm\?token=([^\"&<\s]+)", email_body)
+    assert match, "no confirmation link in the email"
+    return match.group(1)
+
+
+@pytest.fixture
+def sign_up(client, sent):
+    """The whole double opt-in, as a reader does it: the form, the one
+    confirmation email, the button. Returns the confirm page's response."""
+    def _sign_up(email, book_id, **form):
+        before = len(sent)
+        client.post("/signup", data={"email": email, "book_id": book_id, **form})
+        assert len(sent) == before + 1, "signup should send exactly one confirmation"
+        return client.post("/confirm", data={"token": confirm_token_from(sent[-1]["body"])})
+    return _sign_up

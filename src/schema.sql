@@ -134,3 +134,21 @@ CREATE TABLE IF NOT EXISTS acquisitions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_acq_decision ON acquisitions(decision, decided_at);
+
+-- Signups waiting for the address's owner to confirm (double opt-in,
+-- 2026-11-24). Nothing here is a reader yet: no users row, no subscription and
+-- no deliveries until POST /confirm sets confirmed_at. Unconfirmed rows are
+-- deleted after config.PENDING_RETENTION_DAYS. A confirmed row is the record of
+-- consent: who (lookup hash), which book, when.
+CREATE TABLE IF NOT EXISTS pending_signups (
+    id             INTEGER PRIMARY KEY,
+    email_enc      BLOB    NOT NULL,
+    email_lookup   TEXT    NOT NULL,
+    book_id        TEXT    NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    timezone       TEXT    NOT NULL DEFAULT 'UTC',
+    chunks_per_day INTEGER NOT NULL DEFAULT 2,
+    created_at     TEXT    NOT NULL,
+    confirmed_at   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_pending_lookup  ON pending_signups(email_lookup, created_at);
+CREATE INDEX IF NOT EXISTS idx_pending_created ON pending_signups(created_at);

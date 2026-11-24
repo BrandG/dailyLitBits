@@ -28,9 +28,8 @@ def test_library_page_renders(client, book):
 
 # --- signing up ---
 
-def test_signup_creates_a_reader_and_mails_a_link(client, conn, book, sent):
-    response = client.post("/signup", data={
-        "email": "new@example.com", "book_id": book, "timezone": "US/Eastern"})
+def test_signup_creates_a_reader_and_mails_a_link(client, conn, book, sent, sign_up):
+    response = sign_up("new@example.com", book, timezone="US/Eastern")
 
     assert response.status_code == 200
     assert "starts tomorrow" in response.text
@@ -45,17 +44,17 @@ def test_signup_creates_a_reader_and_mails_a_link(client, conn, book, sent):
     assert sub["status"] == "active"
     assert sub["current_sequence"] == 1
 
-    assert len(sent) == 1
-    assert security.verify_dashboard_token(dashboard_token_from(sent[0]["body"])) == str(user["id"])
+    assert len(sent) == 2        # the confirmation, then the welcome
+    assert security.verify_dashboard_token(dashboard_token_from(sent[-1]["body"])) == str(user["id"])
 
 
-def test_a_second_book_is_queued_not_started(client, conn, book, sent):
+def test_a_second_book_is_queued_not_started(client, conn, book, sent, sign_up):
     conn.execute(
         """INSERT INTO books (id, title, author, total_chunks, total_words, created_at)
            VALUES ('pgtwo', 'Second Book', 'Author', 4, 1200, '2026-01-01T00:00:00+00:00')""")
 
-    client.post("/signup", data={"email": "new@example.com", "book_id": book})
-    response = client.post("/signup", data={"email": "new@example.com", "book_id": "pgtwo"})
+    sign_up("new@example.com", book)
+    response = sign_up("new@example.com", "pgtwo")
 
     assert "queue" in response.text.lower()
     statuses = dict(conn.execute(
@@ -66,9 +65,9 @@ def test_a_second_book_is_queued_not_started(client, conn, book, sent):
     assert statuses["pgtwo"] == "queued"
 
 
-def test_signing_up_for_the_same_book_twice_is_refused_politely(client, conn, book, sent):
-    client.post("/signup", data={"email": "new@example.com", "book_id": book})
-    response = client.post("/signup", data={"email": "new@example.com", "book_id": book})
+def test_signing_up_for_the_same_book_twice_is_refused_politely(client, conn, book, sent, sign_up):
+    sign_up("new@example.com", book)
+    response = sign_up("new@example.com", book)
 
     assert response.status_code == 200
     assert "already reading" in response.text.lower()
@@ -582,3 +581,80 @@ def test_hold_blocks_delivery_to_new_accounts(client, conn, reader, sent, monkey
     ok, message = dispatch.process_subscription(sub_id, trigger="next", conn=conn)
     assert not ok and message.startswith("Held")
     assert sent == []
+
+
+# --- double opt-in (2026-11-24) ---
+
+def _count(conn, table):
+    return conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+
+
+def test_signup_only_asks_for_confirmation(client, conn, book, sent):
+    response = client.post("/signup", data={"email": "new@example.com", "book_id": book})
+    assert "confirmation link" in response.text
+    assert _count(conn, "users") == 0
+    assert _count(conn, "subscriptions") == 0
+    assert _count(conn, "pending_signups") == 1
+    assert len(sent) == 1
+    assert "/confirm?token=" in sent[0]["body"]
+    assert "/profile?token=" not in sent[0]["body"]   # nothing usable before the click
+
+
+def test_confirm_link_get_only_asks(client, conn, book, sent):
+    from conftest import confirm_token_from
+    client.post("/signup", data={"email": "new@example.com", "book_id": book})
+    response = client.get(f"/confirm?token={confirm_token_from(sent[0]['body'])}")
+    assert response.status_code == 200
+    assert 'method="post"' in response.text
+    assert _count(conn, "users") == 0
+    assert len(sent) == 1
+
+
+def test_confirming_twice_makes_one_subscription_and_one_welcome(client, conn, book, sent, sign_up):
+    from conftest import confirm_token_from
+    sign_up("new@example.com", book)
+    token = confirm_token_from(sent[0]["body"])
+    again = client.post("/confirm", data={"token": token})
+    assert "already confirmed" in again.text.lower()
+    assert _count(conn, "subscriptions") == 1
+    assert len(sent) == 2
+
+
+def test_one_confirmation_per_address_per_day(client, conn, book, sent):
+    first = client.post("/signup", data={"email": "victim@example.com", "book_id": book})
+    second = client.post("/signup", data={"email": "victim@example.com", "book_id": book})
+    assert len(sent) == 1
+    assert "confirmation link" in second.text      # same answer: no address probing
+    assert _count(conn, "pending_signups") == 1
+
+
+def test_hourly_cap_on_confirmation_emails(client, conn, book, sent, monkeypatch):
+    import config
+    monkeypatch.setattr(config, "CONFIRM_SENDS_PER_HOUR", 2)
+    for n in range(3):
+        response = client.post("/signup", data={"email": f"p{n}@example.com", "book_id": book})
+    assert len(sent) == 2
+    assert "try again" in response.text
+
+
+def test_forged_and_expired_confirm_links_are_refused(client, conn, book, sent, monkeypatch):
+    from conftest import confirm_token_from
+    import config
+    assert "expired" in client.post("/confirm", data={"token": "junk"}).text
+    client.post("/signup", data={"email": "new@example.com", "book_id": book})
+    monkeypatch.setattr(config, "CONFIRM_TOKEN_MAX_AGE", -1)
+    response = client.post("/confirm", data={"token": confirm_token_from(sent[0]["body"])})
+    assert "expired" in response.text
+    assert _count(conn, "users") == 0
+
+
+def test_confirming_releases_a_held_account(client, conn, reader, sent, sign_up, monkeypatch):
+    import config
+    import dispatch
+    monkeypatch.setattr(config, "DELIVERY_HOLD_SINCE", "2000-01-01")
+    _, sub_id = reader
+    assert dispatch.process_subscription(sub_id, trigger="next", conn=conn)[1].startswith("Held")
+    response = sign_up("reader@example.com", "pgtest")
+    assert "already reading" in response.text.lower()
+    ok, message = dispatch.process_subscription(sub_id, trigger="next", conn=conn)
+    assert ok, message

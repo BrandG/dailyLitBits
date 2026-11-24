@@ -68,3 +68,12 @@ JEV_DAILY_USD_CAP = float(os.getenv("JEV_DAILY_USD_CAP", "0.25"))
 # Nothing is deleted; held subscriptions keep their place.
 SIGNUPS_OPEN = os.getenv("SIGNUPS_OPEN", "0") == "1"
 DELIVERY_HOLD_SINCE = os.getenv("DELIVERY_HOLD_SINCE", "2026-11-19")
+
+# --- Double opt-in ---
+# A confirmation link works for this long.
+CONFIRM_TOKEN_MAX_AGE = int(os.getenv("CONFIRM_TOKEN_MAX_AGE", str(48 * 3600)))
+# Ceiling on confirmation emails the whole site sends per hour. Normal demand
+# is a handful a day; this bounds what an abusive burst can make us send.
+CONFIRM_SENDS_PER_HOUR = int(os.getenv("CONFIRM_SENDS_PER_HOUR", "20"))
+# Unconfirmed requests are forgotten after this many days.
+PENDING_RETENTION_DAYS = int(os.getenv("PENDING_RETENTION_DAYS", "7"))
