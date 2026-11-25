@@ -658,3 +658,18 @@ def test_confirming_releases_a_held_account(client, conn, reader, sent, sign_up,
     assert "already reading" in response.text.lower()
     ok, message = dispatch.process_subscription(sub_id, trigger="next", conn=conn)
     assert ok, message
+
+
+def test_closed_signups_still_admit_the_test_allowlist(client, conn, book, sent, monkeypatch):
+    import config
+    monkeypatch.setattr(config, "SIGNUPS_OPEN", False)
+    monkeypatch.setattr(config, "SIGNUP_TEST_ADDRESSES", {"tester@example.com"})
+    refused = client.post("/signup", data={"email": "stranger@example.com", "book_id": book})
+    assert "paused" in refused.text
+    assert len(sent) == 0
+    alias = client.post("/signup", data={"email": "Tester+one@Example.com", "book_id": book})
+    assert "confirmation link" in alias.text
+    assert len(sent) == 1
+    lookalike = client.post("/signup", data={"email": "tester@example.com.evil", "book_id": book})
+    assert "paused" in lookalike.text
+    assert len(sent) == 1

@@ -67,6 +67,11 @@ JEV_DAILY_USD_CAP = float(os.getenv("JEV_DAILY_USD_CAP", "0.25"))
 #                           UTC timestamp prefix; set it empty to lift the hold.
 # Nothing is deleted; held subscriptions keep their place.
 SIGNUPS_OPEN = os.getenv("SIGNUPS_OPEN", "0") == "1"
+# While signups are closed, these addresses (comma-separated, plus-aliases
+# included) may still sign up, so the flow can be tested end to end. Set it in
+# .env only: this repository is public.
+SIGNUP_TEST_ADDRESSES = {a.strip().lower() for a in
+                         os.getenv("SIGNUP_TEST_ADDRESSES", "").split(",") if a.strip()}
 DELIVERY_HOLD_SINCE = os.getenv("DELIVERY_HOLD_SINCE", "2026-11-19")
 
 # --- Double opt-in ---

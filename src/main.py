@@ -437,6 +437,17 @@ async def stats_page(request: Request, conn=Depends(get_db)):
 
 # --- SIGNUP ---
 
+def signup_test_allowed(email):
+    """True for an address on config.SIGNUP_TEST_ADDRESSES, or a plus-alias of
+    one (name+anything@domain), so a tester can sign up repeatedly as new."""
+    address = email.strip().lower()
+    local, at, domain = address.partition("@")
+    if not at or not domain:
+        return False
+    base = f"{local.split('+', 1)[0]}@{domain}"
+    return address in config.SIGNUP_TEST_ADDRESSES or base in config.SIGNUP_TEST_ADDRESSES
+
+
 @app.post("/signup", response_class=HTMLResponse)
 async def handle_signup(
     request: Request,
@@ -446,7 +457,7 @@ async def handle_signup(
     chunks_per_day: int = Form(2),
     conn=Depends(get_db),
 ):
-    if not config.SIGNUPS_OPEN:
+    if not config.SIGNUPS_OPEN and not signup_test_allowed(email):
         return templates.TemplateResponse("index.html", {
             "request": request, "signed_in": signed_in(request), "books": book_choices(conn), "recent": recent_books(conn),
             "message": "New signups are paused for a few days while we improve the service. Please check back soon.",
