@@ -494,20 +494,43 @@ def signup_test_allowed(email):
     return address in config.SIGNUP_TEST_ADDRESSES or base in config.SIGNUP_TEST_ADDRESSES
 
 
+# What every accepted-looking signup says, whether or not mail went out, so the
+# form does not reveal limits, suppressions or the honeypot.
+SIGNUP_CHECK_EMAIL = ("Almost there: we've sent a confirmation link to that address. "
+                      "Nothing else will arrive unless it is clicked.")
+
+
 @app.post("/signup", response_class=HTMLResponse)
 async def handle_signup(
     request: Request,
     email: str = Form(...),
-    book_id: str = Form(...),
+    book_id: str = Form(""),
     timezone_name: str = Form("UTC", alias="timezone"),
     chunks_per_day: int = Form(2),
     turnstile_token: str = Form("", alias="cf-turnstile-response"),
+    honeypot: str = Form("", alias="website"),
     conn=Depends(get_db),
 ):
     if not config.SIGNUPS_OPEN and not signup_test_allowed(email):
         return templates.TemplateResponse("index.html", {
             "request": request, "signed_in": signed_in(request), "books": book_choices(conn), "recent": recent_books(conn),
             "message": "New signups are paused for a few days while we improve the service. Please check back soon.",
+        })
+
+    # A person never sees the honeypot field; a bot filling every input does.
+    # It gets the ordinary answer and nothing happens. One signal among
+    # several: Turnstile and the rate limits still apply to everything else.
+    if honeypot.strip():
+        log("[WARN] Signup dropped: honeypot field was filled")
+        return templates.TemplateResponse("index.html", {
+            "request": request, "signed_in": signed_in(request), "books": book_choices(conn), "recent": recent_books(conn),
+            "message": SIGNUP_CHECK_EMAIL,
+        })
+
+    if not book_id.strip():
+        return templates.TemplateResponse("index.html", {
+            "request": request, "signed_in": signed_in(request), "books": book_choices(conn), "recent": recent_books(conn),
+            "message": "Please choose a book to start with.",
         })
 
     book = conn.execute("SELECT id, title FROM books WHERE id = ?", (book_id,)).fetchone()
@@ -533,8 +556,7 @@ async def handle_signup(
 
     # The same answer whether or not a confirmation actually goes out, so the
     # form cannot be used to learn which addresses are already readers.
-    check_email = ("Almost there: we've sent a confirmation link to that address. "
-                   "Nothing else will arrive unless it is clicked.")
+    check_email = SIGNUP_CHECK_EMAIL
 
     ip = client_ip(request)
     if not turnstile_passes(turnstile_token, ip):

@@ -46,7 +46,8 @@
 
                             <div class="mb-4">
                                 <label for="book_id" class="form-label">Choose a book</label>
-                                <select class="form-select" id="book_id" name="book_id">
+                                <select class="form-select" id="book_id" name="book_id" required>
+                                    <option value="" selected disabled>Choose a book&hellip;</option>
                                     {% for book in books %}
                                     <option value="{{ book.book_id }}">
                                         {{ book.title }} by {{ book.author }}
@@ -59,6 +60,19 @@
                             </div>
 
                             <input type="hidden" id="timezone" name="timezone" value="UTC">
+
+                            {# Honeypot: invisible to people, tempting to form-filling bots.
+                               Anything typed here means the signup is quietly dropped. #}
+                            <div aria-hidden="true" style="position: absolute; left: -10000px; top: auto; width: 1px; height: 1px; overflow: hidden;">
+                                <label for="website">Leave this field empty</label>
+                                <input type="text" id="website" name="website" value="" tabindex="-1" autocomplete="off">
+                            </div>
+
+                            <p class="form-text mb-3">
+                                You'll get <strong>one email every morning</strong> with the next few hundred
+                                words of your book, until it's finished. First, we'll email you a link to
+                                confirm. Every email has a one-click unsubscribe link.
+                            </p>
 
                             {% if turnstile_site_key %}
                             <div class="cf-turnstile mb-3" data-sitekey="{{ turnstile_site_key }}" data-theme="auto"></div>
