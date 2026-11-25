@@ -14,7 +14,7 @@ from logger import log
 from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, Request, Form, Depends
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import PlainTextResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -1143,12 +1143,9 @@ async def unsubscribe_confirm(request: Request, token: str, conn=Depends(get_db)
     """)
 
 
-@app.post("/unsubscribe", response_class=HTMLResponse)
-async def unsubscribe_process(token: str = Form(...), conn=Depends(get_db)):
-    sub_id = verify_unsub_token(token)
-    if not sub_id:
-        return invalid_link()
-
+def unsubscribe_subscription(conn, sub_id, **detail):
+    """Closes one subscription. True if it was open. Idempotent: a second call,
+    or a call for a subscription that is gone, changes nothing."""
     sub = conn.execute("SELECT book_id, current_sequence FROM subscriptions WHERE id = ?",
                        (int(sub_id),)).fetchone()
     with db.transaction(conn):
@@ -1159,12 +1156,41 @@ async def unsubscribe_process(token: str = Form(...), conn=Depends(get_db)):
         )
         if cur.rowcount and sub:
             events.record(conn, "unsubscribed", subscription_id=int(sub_id),
-                          book_id=sub["book_id"], sequence=sub["current_sequence"])
+                          book_id=sub["book_id"], sequence=sub["current_sequence"], **detail)
+    return bool(cur.rowcount)
+
+
+@app.post("/unsubscribe", response_class=HTMLResponse)
+async def unsubscribe_process(token: str = Form(...), conn=Depends(get_db)):
+    sub_id = verify_unsub_token(token)
+    if not sub_id:
+        return invalid_link()
+
+    closed = unsubscribe_subscription(conn, sub_id)
     return simple_page(
         "Unsubscribe",
-        "<p>You have been unsubscribed.</p>" if cur.rowcount
+        "<p>You have been unsubscribed.</p>" if closed
         else "<p>That subscription was already closed.</p>",
     )
+
+
+# One-click unsubscribe (RFC 8058), the URL in each email's List-Unsubscribe
+# header. The mailbox provider POSTs "List-Unsubscribe=One-Click" here on the
+# reader's behalf: no confirmation step, no login, no redirect, and a 200
+# whether or not the subscription was still open. A GET is a person or a link
+# scanner, so it only gets the ordinary confirmation page.
+@app.post("/unsubscribe/one-click")
+async def unsubscribe_one_click(token: str, conn=Depends(get_db)):
+    sub_id = verify_unsub_token(token)
+    if not sub_id:
+        return PlainTextResponse("Invalid unsubscribe link.", status_code=400)
+    unsubscribe_subscription(conn, sub_id, trigger="one_click")
+    return PlainTextResponse("You have been unsubscribed.")
+
+
+@app.get("/unsubscribe/one-click", response_class=HTMLResponse)
+async def unsubscribe_one_click_page(request: Request, token: str, conn=Depends(get_db)):
+    return await unsubscribe_confirm(request, token, conn)
 
 
 # --- SUGGESTIONS ---

@@ -71,8 +71,9 @@ def sent(monkeypatch):
     """Captures outgoing email instead of sending it."""
     outbox = []
 
-    def fake_send(to_email, subject, html_body):
-        outbox.append({"to": to_email, "subject": subject, "body": html_body})
+    def fake_send(to_email, subject, html_body, headers=None):
+        outbox.append({"to": to_email, "subject": subject, "body": html_body,
+                       "headers": headers or {}})
         return True
 
     monkeypatch.setattr(dispatch, "send_via_brevo", fake_send)

@@ -72,6 +72,17 @@ EMAIL_HEAD = """
 """
 
 
+def unsubscribe_headers(sub_id):
+    """RFC 8058 one-click unsubscribe. Mailbox providers (Gmail's own
+    Unsubscribe button) POST to this URL with List-Unsubscribe=One-Click and no
+    further step; a GET there only shows the usual confirmation page."""
+    token = security.generate_unsub_token(sub_id)
+    return {
+        "List-Unsubscribe": f"<https://dailylitbits.com/unsubscribe/one-click?token={token}>",
+        "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+    }
+
+
 def format_email_html(title, first_seq, last_seq, total_chunks, content,
                       unsub_token, next_token, dashboard_token, recap=None):
     html_content = content.replace('\n\n', '</p><p>').replace('\n', '<br>')
@@ -226,7 +237,7 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
-def send_via_brevo(to_email, subject, html_body):
+def send_via_brevo(to_email, subject, html_body, headers=None):
     """Sends an email via Brevo SMTP. Refuses a suppressed address whatever
     the caller checked: this is the one place every email passes through."""
     guard = db.get_db()
@@ -241,6 +252,8 @@ def send_via_brevo(to_email, subject, html_body):
     msg['From'] = config.FROM_EMAIL
     msg['To'] = to_email
     msg['Subject'] = subject
+    for name, value in (headers or {}).items():
+        msg[name] = value
 
     msg.attach(MIMEText(html_body, 'html'))
 
@@ -382,7 +395,8 @@ def process_subscription(sub_id, trigger="cron", conn=None, dry_run=False):
             return True, (f"[dry run] {subject} - {len(rows)} chunk(s), "
                           f"{len(html_body)} bytes, recap {'yes' if recap else 'no'}")
 
-        if not send_via_brevo(email, subject, html_body):
+        if not send_via_brevo(email, subject, html_body,
+                              headers=unsubscribe_headers(sub["id"])):
             return False, "Failed to send email"
 
         conn.execute(
