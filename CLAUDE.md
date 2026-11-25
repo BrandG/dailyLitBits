@@ -679,3 +679,42 @@ place: removing it needs another auth-off window on the shared database, and
 it is a read/write grant on a database that no longer exists.
 
 
+
+### 2026-11-19 to 2026-11-25 - Signup flood (probable subscription bombing)
+
+**Symptom.** The site had 6 readers before 2026-11-19. Over the next six days `/signup`
+took 1,043 new accounts, every one for A Christmas Carol (`pg24022`) with identical
+settings (UTC, 2 chunks a day), from a handful of addresses in one /24. Daily
+deliveries climbed to 864. Brevo logged complaints, and the sender's reputation suffered
+at Gmail at the same time (that was mostly the BlueHorseshoe report emails sharing the
+sender; see the project memory).
+
+**Cause.** `/signup` had no CAPTCHA, no rate limit and no opt-in: any POST created an
+active subscription and started mail. Uniform book and settings plus complaints from the
+recipients suggest a bot feeding other people's addresses in (subscription bombing),
+not real readers. That is an inference, not proven.
+
+**Containment (2026-11-24).** `SIGNUPS_OPEN` (default off) closed the form;
+`DELIVERY_HOLD_SINCE=2026-11-19` held every account created on or after that date in
+`dispatch.process_subscription`. `GET /next` and `GET /switch_book` now show a
+confirmation page and only the POST acts, because mail-security scanners following
+links were firing sends.
+
+**Fixes.**
+- Double opt-in: `pending_signups`, GET/POST `/confirm`, per-address and site-wide
+  hourly limits.
+- Cloudflare Turnstile on the form (keys in `.env`; fails closed with no secret) and a
+  per-IP limit, 3 an hour and 10 a day, with the IP stored only as a keyed hash.
+- The bot made its last signup POST at 04:51 UTC on 2026-11-25, minutes before the
+  Turnstile widget went live, and has only loaded the homepage since.
+
+**Cleanup (2026-11-25).** All 1,043 flood accounts were deleted with their
+subscriptions and 3,225 event rows; the 6 pre-flood readers were checked unchanged
+before and after. Nobody among them had done anything but receive mail (one unsubscribe,
+most likely a recipient). Backup taken first:
+`data/app.db.bak-pre-flood-delete-2026-11-25`. It holds the addresses of people who
+never consented, so delete it (and the other `bak-pre-*` files from this incident) once
+it is clear nothing needs restoring.
+
+**Still open.** Brevo's complaints, bounces and unsubscribes are not synced back into
+the app. Signups stay closed until that is done.
