@@ -20,6 +20,9 @@ from fastapi.templating import Jinja2Templates
 
 import config
 import html
+import ipaddress
+
+import requests
 import db
 import dispatch
 import events
@@ -32,6 +35,49 @@ from user_manager import UserManager
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
+# The signup form shows the Turnstile widget only when a site key is set.
+templates.env.globals["turnstile_site_key"] = config.TURNSTILE_SITE_KEY
+
+TURNSTILE_VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
+
+
+def client_ip(request):
+    """The requester's address. nginx passes it as X-Real-IP; the header is only
+    believed when the request arrived from a private address (the proxy), so a
+    request that somehow reaches the app directly cannot choose its own."""
+    peer = request.client.host if request.client else ""
+    try:
+        address = ipaddress.ip_address(peer)
+        via_proxy = address.is_private or address.is_loopback
+    except ValueError:
+        via_proxy = False
+    if via_proxy:
+        forwarded = request.headers.get("x-real-ip", "").strip()
+        if forwarded:
+            return forwarded
+    return peer
+
+
+def turnstile_passes(token, ip):
+    """Server-side check of the Turnstile widget's token. Fails closed: no
+    secret, no token, a network error or an odd answer all mean no."""
+    if not config.TURNSTILE_SECRET_KEY or not token:
+        return False
+    try:
+        response = requests.post(TURNSTILE_VERIFY_URL, timeout=8, data={
+            "secret": config.TURNSTILE_SECRET_KEY, "response": token, "remoteip": ip})
+        result = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        log(f"[WARN] Turnstile check could not complete: {type(exc).__name__}")
+        return False
+    if not result.get("success"):
+        log(f"[INFO] Turnstile refused a signup: {result.get('error-codes')}")
+        return False
+    hostname = (result.get("hostname") or "").lower()
+    if config.TURNSTILE_HOSTNAMES and hostname not in config.TURNSTILE_HOSTNAMES:
+        log(f"[WARN] Turnstile token was for another hostname: {hostname}")
+        return False
+    return True
 
 BASE_URL = "https://dailylitbits.com"
 
@@ -455,6 +501,7 @@ async def handle_signup(
     book_id: str = Form(...),
     timezone_name: str = Form("UTC", alias="timezone"),
     chunks_per_day: int = Form(2),
+    turnstile_token: str = Form("", alias="cf-turnstile-response"),
     conn=Depends(get_db),
 ):
     if not config.SIGNUPS_OPEN and not signup_test_allowed(email):
@@ -489,8 +536,25 @@ async def handle_signup(
     check_email = ("Almost there: we've sent a confirmation link to that address. "
                    "Nothing else will arrive unless it is clicked.")
 
+    ip = client_ip(request)
+    if not turnstile_passes(turnstile_token, ip):
+        return page("Please complete the human check below the form and try again.")
+    ip_key = security.ip_hash(ip)
+
     pending_id = None
     with db.transaction(conn):
+        # Per client address, before anything else: one source cannot fill the
+        # site-wide hourly allowance on its own.
+        from_ip = conn.execute(
+            """SELECT SUM(created_at >= ?), COUNT(*) FROM pending_signups
+               WHERE ip_hash = ? AND created_at >= ?""",
+            (stamp(now - timedelta(hours=1)), ip_key, stamp(now - timedelta(hours=24)))).fetchone()
+        last_hour, last_day = (from_ip[0] or 0), from_ip[1]
+        if (last_hour >= config.SIGNUPS_PER_IP_PER_HOUR
+                or last_day >= config.SIGNUPS_PER_IP_PER_DAY):
+            log(f"[WARN] Signup refused: per-address limit ({last_hour}/h, {last_day}/day)")
+            return page("Too many signups from your network. Please try again later.")
+
         # Abandoned requests are kept a week, then forgotten.
         conn.execute(
             "DELETE FROM pending_signups WHERE confirmed_at IS NULL AND created_at < ?",
@@ -511,10 +575,11 @@ async def handle_signup(
                 return page("We're getting a lot of signups right now. Please try again in an hour.")
             pending_id = conn.execute(
                 """INSERT INTO pending_signups
-                       (email_enc, email_lookup, book_id, timezone, chunks_per_day, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
+                       (email_enc, email_lookup, book_id, timezone, chunks_per_day,
+                        created_at, ip_hash)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 (manager.encrypt_email(email), lookup, book_id, timezone_name,
-                 chunks_per_day, stamp(now))).lastrowid
+                 chunks_per_day, stamp(now), ip_key)).lastrowid
 
     if pending_id:
         token = security.generate_confirm_token(pending_id)

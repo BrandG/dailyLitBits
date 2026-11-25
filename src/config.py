@@ -82,3 +82,17 @@ CONFIRM_TOKEN_MAX_AGE = int(os.getenv("CONFIRM_TOKEN_MAX_AGE", str(48 * 3600)))
 CONFIRM_SENDS_PER_HOUR = int(os.getenv("CONFIRM_SENDS_PER_HOUR", "20"))
 # Unconfirmed requests are forgotten after this many days.
 PENDING_RETENTION_DAYS = int(os.getenv("PENDING_RETENTION_DAYS", "7"))
+
+# --- Bot protection on /signup ---
+# Cloudflare Turnstile. Both keys come from the Cloudflare dashboard; the secret
+# lives in .env only. With no secret configured every signup is refused (fails
+# closed), so the form cannot run unprotected by accident.
+TURNSTILE_SITE_KEY = os.getenv("TURNSTILE_SITE_KEY", "")
+TURNSTILE_SECRET_KEY = os.getenv("TURNSTILE_SECRET_KEY", "")
+# A token minted for another site is refused.
+TURNSTILE_HOSTNAMES = {h.strip().lower() for h in os.getenv(
+    "TURNSTILE_HOSTNAMES", "dailylitbits.com,www.dailylitbits.com").split(",") if h.strip()}
+# Signup requests accepted from one client address. Kept low: real readers sign
+# up once, and an office or household sharing an address is still well inside.
+SIGNUPS_PER_IP_PER_HOUR = int(os.getenv("SIGNUPS_PER_IP_PER_HOUR", "3"))
+SIGNUPS_PER_IP_PER_DAY = int(os.getenv("SIGNUPS_PER_IP_PER_DAY", "10"))

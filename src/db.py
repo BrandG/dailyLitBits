@@ -67,6 +67,13 @@ def add_missing_columns(conn):
                WHERE status = 'queued'"""
         )
 
+    pending = {row["name"] for row in conn.execute("PRAGMA table_info(pending_signups)")}
+    if pending and "ip_hash" not in pending:
+        conn.execute("ALTER TABLE pending_signups ADD COLUMN ip_hash TEXT")
+    if pending:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_pending_ip "
+                     "ON pending_signups(ip_hash, created_at)")
+
     return conn
 
 

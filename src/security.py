@@ -20,6 +20,9 @@ Signed with config.SECRET_KEY, which is NOT the Fernet ENCRYPTION_KEY.
 Reusing one key for both meant rotating it would invalidate every outstanding
 link and make every stored email address undecryptable at the same time.
 """
+import hashlib
+import hmac
+
 from itsdangerous import URLSafeSerializer, URLSafeTimedSerializer, BadData
 
 import config
@@ -96,3 +99,11 @@ def verify_confirm_token(token, max_age=None):
             token, max_age=max_age)
     except BadData:
         return None
+
+
+# --- CLIENT ADDRESS (rate limiting only) ---
+def ip_hash(ip):
+    """Keyed hash of a client address. Enough to count requests from one
+    address; not reversible to the address without the key."""
+    return hmac.new(config.SECRET_KEY.encode(), f"ip:{ip}".encode(),
+                    hashlib.sha256).hexdigest()[:32]

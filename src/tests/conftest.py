@@ -21,6 +21,10 @@ os.environ["DB_PATH"] = os.path.join(tempfile.mkdtemp(prefix="dlb-test-"), "test
 import db  # noqa: E402
 import dispatch  # noqa: E402
 import main  # noqa: E402
+
+# The real check, kept for the tests that exercise it; every other test runs
+# with Turnstile passing (see service_open).
+REAL_TURNSTILE_PASSES = main.turnstile_passes
 import security  # noqa: E402
 from user_manager import UserManager  # noqa: E402
 
@@ -104,6 +108,9 @@ def service_open(monkeypatch):
     import config
     monkeypatch.setattr(config, "SIGNUPS_OPEN", True)
     monkeypatch.setattr(config, "DELIVERY_HOLD_SINCE", "")
+    monkeypatch.setattr(main, "turnstile_passes", lambda token, ip: True)
+    monkeypatch.setattr(config, "SIGNUPS_PER_IP_PER_HOUR", 1000)
+    monkeypatch.setattr(config, "SIGNUPS_PER_IP_PER_DAY", 1000)
 
 
 def confirm_token_from(email_body):

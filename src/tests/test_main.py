@@ -673,3 +673,84 @@ def test_closed_signups_still_admit_the_test_allowlist(client, conn, book, sent,
     lookalike = client.post("/signup", data={"email": "tester@example.com.evil", "book_id": book})
     assert "paused" in lookalike.text
     assert len(sent) == 1
+
+
+# --- bot protection (2026-11-25) ---
+
+def test_signup_without_a_passing_turnstile_sends_nothing(client, conn, book, sent, monkeypatch):
+    monkeypatch.setattr(main, "turnstile_passes", lambda token, ip: False)
+    response = client.post("/signup", data={"email": "new@example.com", "book_id": book})
+    assert "human check" in response.text
+    assert _count(conn, "pending_signups") == 0
+    assert sent == []
+
+
+def test_per_address_limit(client, conn, book, sent, monkeypatch):
+    import config
+    monkeypatch.setattr(config, "SIGNUPS_PER_IP_PER_HOUR", 2)
+    for n in range(3):
+        response = client.post("/signup", data={"email": f"r{n}@example.com", "book_id": book})
+    assert "Too many signups from your network" in response.text
+    assert len(sent) == 2
+    stored = conn.execute("SELECT DISTINCT ip_hash FROM pending_signups").fetchall()
+    assert len(stored) == 1 and stored[0][0] and "testclient" not in stored[0][0]
+
+
+def test_per_address_daily_limit(client, conn, book, sent, monkeypatch):
+    import config
+    monkeypatch.setattr(config, "SIGNUPS_PER_IP_PER_DAY", 1)
+    client.post("/signup", data={"email": "a@example.com", "book_id": book})
+    response = client.post("/signup", data={"email": "b@example.com", "book_id": book})
+    assert "Too many signups" in response.text
+    assert len(sent) == 1
+
+
+def test_client_ip_trusts_the_header_only_from_the_proxy():
+    from types import SimpleNamespace as NS
+    via_proxy = NS(client=NS(host="172.17.0.1"), headers={"x-real-ip": "2.26.150.153"})
+    # A public peer (not a documentation range: Python counts those as private).
+    direct = NS(client=NS(host="8.8.8.8"), headers={"x-real-ip": "1.1.1.1"})
+    assert main.client_ip(via_proxy) == "2.26.150.153"
+    assert main.client_ip(direct) == "8.8.8.8"
+
+
+class _Reply:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def json(self):
+        return self.payload
+
+
+def test_turnstile_check_fails_closed(monkeypatch):
+    import config
+    from conftest import REAL_TURNSTILE_PASSES as check
+    monkeypatch.setattr(config, "TURNSTILE_SECRET_KEY", "secret")
+    answers = {}
+    monkeypatch.setattr(main.requests, "post",
+                        lambda url, timeout, data: _Reply(answers["next"]))
+
+    answers["next"] = {"success": True, "hostname": "dailylitbits.com"}
+    assert check("token", "1.2.3.4") is True
+    answers["next"] = {"success": False, "error-codes": ["invalid-input-response"]}
+    assert check("token", "1.2.3.4") is False
+    answers["next"] = {"success": True, "hostname": "elsewhere.example"}
+    assert check("token", "1.2.3.4") is False
+    assert check("", "1.2.3.4") is False
+
+    def broken(url, timeout, data):
+        raise main.requests.ConnectionError("down")
+    monkeypatch.setattr(main.requests, "post", broken)
+    assert check("token", "1.2.3.4") is False
+
+    monkeypatch.setattr(config, "TURNSTILE_SECRET_KEY", "")
+    assert check("token", "1.2.3.4") is False
+
+
+def test_form_shows_the_widget_only_with_a_site_key(client, conn, book, monkeypatch):
+    monkeypatch.setitem(main.templates.env.globals, "turnstile_site_key", "")
+    assert "cf-turnstile" not in client.get("/").text
+    monkeypatch.setitem(main.templates.env.globals, "turnstile_site_key", "0xSITEKEY")
+    page = client.get("/").text
+    assert 'data-sitekey="0xSITEKEY"' in page
+    assert "challenges.cloudflare.com/turnstile/v0/api.js" in page

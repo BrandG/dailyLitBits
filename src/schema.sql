@@ -148,7 +148,10 @@ CREATE TABLE IF NOT EXISTS pending_signups (
     timezone       TEXT    NOT NULL DEFAULT 'UTC',
     chunks_per_day INTEGER NOT NULL DEFAULT 2,
     created_at     TEXT    NOT NULL,
-    confirmed_at   TEXT
+    confirmed_at   TEXT,
+    -- security.ip_hash of the requesting address, for the per-IP limit.
+    -- Its index is made in db.add_missing_columns, after the column exists.
+    ip_hash        TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_pending_lookup  ON pending_signups(email_lookup, created_at);
 CREATE INDEX IF NOT EXISTS idx_pending_created ON pending_signups(created_at);
