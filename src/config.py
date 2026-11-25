@@ -40,6 +40,8 @@ SMTP_PASS = os.getenv("SMTP_PASSWORD")
 BREVO_API_KEY = os.getenv("BREVO_API_KEY")
 BREVO_API_URL = os.getenv("BREVO_API_URL", "https://api.brevo.com/v3")
 FROM_EMAIL = os.getenv("EMAIL_SENDER")
+# Shown as the sender's name in the inbox: "dailyLitBits <pages@...>".
+FROM_NAME = os.getenv("EMAIL_SENDER_NAME", "dailyLitBits")
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 

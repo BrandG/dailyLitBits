@@ -236,6 +236,9 @@ def format_victory_email(book_title, days_taken, word_count, suggestions, dashbo
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.utils import formataddr, parseaddr
+
+import plaintext
 
 def send_via_brevo(to_email, subject, html_body, headers=None):
     """Sends an email via Brevo SMTP. Refuses a suppressed address whatever
@@ -248,14 +251,16 @@ def send_via_brevo(to_email, subject, html_body, headers=None):
     finally:
         guard.close()
 
-    msg = MIMEMultipart()
-    msg['From'] = config.FROM_EMAIL
+    # multipart/alternative: plain text first, HTML last (the preferred one).
+    msg = MIMEMultipart('alternative')
+    msg['From'] = formataddr((config.FROM_NAME, parseaddr(config.FROM_EMAIL or '')[1]))
     msg['To'] = to_email
     msg['Subject'] = subject
     for name, value in (headers or {}).items():
         msg[name] = value
 
-    msg.attach(MIMEText(html_body, 'html'))
+    msg.attach(MIMEText(plaintext.html_to_text(html_body), 'plain', 'utf-8'))
+    msg.attach(MIMEText(html_body, 'html', 'utf-8'))
 
     port = config.SMTP_PORT
 
