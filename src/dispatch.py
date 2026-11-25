@@ -20,6 +20,7 @@ import config
 import db
 import events
 import security
+import suppression
 from user_manager import UserManager
 
 # --- CONFIGURATION ---
@@ -226,7 +227,16 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 def send_via_brevo(to_email, subject, html_body):
-    """Sends an email via Brevo SMTP."""
+    """Sends an email via Brevo SMTP. Refuses a suppressed address whatever
+    the caller checked: this is the one place every email passes through."""
+    guard = db.get_db()
+    try:
+        if suppression.is_suppressed(guard, to_email):
+            print("   [SKIP] Recipient is on the suppression list; not sent.")
+            return False
+    finally:
+        guard.close()
+
     msg = MIMEMultipart()
     msg['From'] = config.FROM_EMAIL
     msg['To'] = to_email
@@ -277,6 +287,12 @@ def process_subscription(sub_id, trigger="cron", conn=None, dry_run=False):
         user = manager.get_user(sub["user_id"])
         if not user:
             return False, "User not found"
+
+        # Suppressed addresses get nothing, ever (see suppression.py).
+        suppressed = suppression.reason_for(conn, user["email_lookup"])
+        if suppressed:
+            suppression.stop_deliveries(conn, user["email_lookup"], suppressed)
+            return False, f"Suppressed ({suppressed}): subscription stopped"
 
         # Containment hold (see config.DELIVERY_HOLD_SINCE). Keyed on the user's
         # creation time, not the subscription's: a queued book that starts gets

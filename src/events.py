@@ -44,6 +44,7 @@ ALLOWED_DETAIL = {
     "to_book",
     "parts",
     "trigger",
+    "reason",         # why a suppression stopped delivery: complaint, hard_bounce, ...
     # Library-side, carried by "acquired". No reader is involved in an
     # acquisition, so these rows have a null subscription_id and are
     # aggregate from birth.

@@ -560,6 +560,13 @@ async def handle_signup(
             "DELETE FROM pending_signups WHERE confirmed_at IS NULL AND created_at < ?",
             (stamp(now - timedelta(days=config.PENDING_RETENTION_DAYS)),))
 
+        # A suppressed address gets no confirmation, and the page says the
+        # same as always, so the form does not reveal who is on the list.
+        if conn.execute("SELECT 1 FROM suppressions WHERE email_lookup = ?",
+                        (lookup,)).fetchone():
+            log("[INFO] Signup for a suppressed address: nothing sent")
+            return page(check_email)
+
         # One unconfirmed request per address per day, so the form cannot be
         # used to bury someone in confirmations.
         waiting = conn.execute(
@@ -669,6 +676,12 @@ async def confirm_signup(token: str = Form(...), conn=Depends(get_db)):
     manager = UserManager(conn)
     email = manager.decrypt_email(pending["email_enc"])
     book = {"id": pending["book_id"], "title": pending["title"]}
+    if conn.execute("SELECT 1 FROM suppressions WHERE email_lookup = ?",
+                    (manager.email_lookup(email),)).fetchone():
+        return simple_page("We can't send to this address",
+                           "<p>Email to this address has bounced or been declined, "
+                           "so we can't start a subscription for it.</p>",
+                           colour="#dc3545")
     user_id = status = refusal = None
     try:
         with db.transaction(conn):

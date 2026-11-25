@@ -33,6 +33,12 @@ SMTP_HOST = os.getenv("SMTP_SERVER", "smtp-relay.brevo.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", 2525))
 SMTP_USER = os.getenv("SMTP_USER")
 SMTP_PASS = os.getenv("SMTP_PASSWORD")
+
+# Brevo REST API, used only to read the transactional blocklist
+# (suppression.py). Not the SMTP key. Brevo also checks the calling IP
+# against Settings > Security > Authorised IPs.
+BREVO_API_KEY = os.getenv("BREVO_API_KEY")
+BREVO_API_URL = os.getenv("BREVO_API_URL", "https://api.brevo.com/v3")
 FROM_EMAIL = os.getenv("EMAIL_SENDER")
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")

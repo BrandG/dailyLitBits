@@ -155,3 +155,16 @@ CREATE TABLE IF NOT EXISTS pending_signups (
 );
 CREATE INDEX IF NOT EXISTS idx_pending_lookup  ON pending_signups(email_lookup, created_at);
 CREATE INDEX IF NOT EXISTS idx_pending_created ON pending_signups(created_at);
+
+-- Addresses that must never be emailed again (2026-11-25). See suppression.py.
+-- Only the lookup hash is kept, so a row can outlive a full account deletion
+-- without keeping the address. Syncs only ever add rows.
+CREATE TABLE IF NOT EXISTS suppressions (
+    email_lookup TEXT PRIMARY KEY,
+    reason       TEXT NOT NULL
+                 CHECK (reason IN ('complaint', 'hard_bounce', 'unsubscribed',
+                                   'invalid', 'manual', 'other')),
+    source       TEXT NOT NULL,   -- 'brevo', 'admin', ...
+    occurred_at  TEXT,            -- when the provider recorded it, if known
+    recorded_at  TEXT NOT NULL
+);
