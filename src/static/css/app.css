@@ -478,27 +478,15 @@ a:hover {
 
 /* ---------- Misc ---------- */
 
-.note {
-    background-color: var(--dlb-surface-2);
-    border: 1px solid var(--dlb-border);
-    border-radius: 10px;
-    padding: .9rem 1rem;
-    font-size: .85rem;
-    color: var(--dlb-ink-muted);
-    line-height: 1.5;
-}
-
-.note .note-head {
-    display: flex;
+/* The homepage's link to the privacy policy, under the signup form. */
+.privacy-link {
+    display: inline-flex;
     align-items: center;
-    justify-content: center;
     gap: .4rem;
-    color: var(--dlb-ink);
+    font-size: .9rem;
     font-weight: 600;
-    margin-bottom: .35rem;
 }
-
-.note svg { width: 15px; height: 15px; color: var(--dlb-accent); }
+.privacy-link svg { width: 15px; height: 15px; }
 
 .progress {
     background-color: var(--dlb-surface-2);
