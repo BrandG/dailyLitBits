@@ -45,9 +45,9 @@
                             </div>
 
                             <div class="mb-4">
-                                <label for="book_id" class="form-label">Choose a book</label>
+                                <label for="book_id" class="form-label">Book</label>
                                 <select class="form-select" id="book_id" name="book_id" required>
-                                    <option value="" selected disabled>Choose a book&hellip;</option>
+                                    <option value="" selected disabled>Pick one&hellip;</option>
                                     {% for book in books %}
                                     <option value="{{ book.book_id }}">
                                         {{ book.title }} by {{ book.author }}

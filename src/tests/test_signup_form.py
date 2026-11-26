@@ -9,7 +9,7 @@ def pending_count(conn):
 
 def test_form_has_no_preselected_book(client, book):
     page = client.get("/").text
-    assert '<option value="" selected disabled>Choose a book' in page
+    assert '<option value="" selected disabled>Pick one' in page
     assert 'name="book_id" required' in page
     # The only "selected" option is the placeholder.
     assert page.count(" selected") == 1
