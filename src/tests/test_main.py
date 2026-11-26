@@ -749,8 +749,12 @@ def test_turnstile_check_fails_closed(monkeypatch):
 
 def test_form_shows_the_widget_only_with_a_site_key(client, conn, book, monkeypatch):
     monkeypatch.setitem(main.templates.env.globals, "turnstile_site_key", "")
-    assert "cf-turnstile" not in client.get("/").text
+    assert 'class="cf-turnstile' not in client.get("/").text
     monkeypatch.setitem(main.templates.env.globals, "turnstile_site_key", "0xSITEKEY")
     page = client.get("/").text
     assert 'data-sitekey="0xSITEKEY"' in page
     assert "challenges.cloudflare.com/turnstile/v0/api.js" in page
+    # Runs on Start reading; the box shows only if Cloudflare wants a click.
+    assert 'data-execution="execute"' in page
+    assert 'data-appearance="interaction-only"' in page
+    assert "turnstile.execute(widget)" in page

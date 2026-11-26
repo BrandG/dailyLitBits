@@ -37,7 +37,7 @@
                         </div>
                         {% endif %}
 
-                        <form action="/signup" method="post">
+                        <form action="/signup" method="post" id="signup-form">
                             <div class="mb-3">
                                 <label for="email" class="form-label">Email address</label>
                                 <input type="email" class="form-control" id="email" name="email"
@@ -75,11 +75,20 @@
                             </p>
 
                             {% if turnstile_site_key %}
-                            <div class="cf-turnstile mb-3" data-sitekey="{{ turnstile_site_key }}" data-theme="auto"></div>
+                            {# The check starts when Start reading is pressed, and the box
+                               only appears if Cloudflare wants a click. Most people never see it. #}
+                            <div class="cf-turnstile mb-3" data-sitekey="{{ turnstile_site_key }}" data-theme="auto"
+                                data-execution="execute" data-appearance="interaction-only"
+                                data-callback="dlbTurnstileDone" data-error-callback="dlbTurnstileFailed"
+                                data-expired-callback="dlbTurnstileExpired"></div>
+                            <div id="turnstile-problem" class="alert alert-warning small mb-3" role="alert" hidden>
+                                The human check couldn't run. If you use a content or script blocker, please
+                                allow <code>challenges.cloudflare.com</code> and try again.
+                            </div>
                             {% endif %}
 
                             <div class="d-grid">
-                                <button type="submit" class="btn btn-primary btn-lg">Start reading</button>
+                                <button type="submit" class="btn btn-primary btn-lg" id="signup-button">Start reading</button>
                             </div>
                         </form>
 
@@ -158,7 +167,49 @@
             console.log("Timezone detection failed, defaulting to UTC");
         }
 
-        // 2. Pre-select Book from URL (e.g. dailylitbits.com/?book=pg11)
+        // 2. Human check on submit (only when the widget is on the page)
+        (function () {
+            const form = document.getElementById('signup-form');
+            const widget = form && form.querySelector('.cf-turnstile');
+            if (!widget) return;
+            const button = document.getElementById('signup-button');
+            const problem = document.getElementById('turnstile-problem');
+            const label = button.textContent;
+            let started = false;
+
+            function idle() {
+                button.disabled = false;
+                button.textContent = label;
+            }
+            function failed() {
+                started = false;
+                idle();
+                problem.hidden = false;
+            }
+            window.dlbTurnstileDone = function () {
+                // form.submit() skips this handler, so it cannot loop.
+                form.submit();
+            };
+            window.dlbTurnstileFailed = function () { failed(); return true; };
+            window.dlbTurnstileExpired = function () {
+                started = false;
+                idle();
+                if (window.turnstile) turnstile.reset(widget);
+            };
+
+            form.addEventListener('submit', function (e) {
+                e.preventDefault();
+                problem.hidden = true;
+                if (!window.turnstile) { failed(); return; }
+                button.disabled = true;
+                button.textContent = 'Checking\u2026';
+                if (started) turnstile.reset(widget);
+                started = true;
+                turnstile.execute(widget);
+            });
+        })();
+
+        // 3. Pre-select Book from URL (e.g. dailylitbits.com/?book=pg11)
         const urlParams = new URLSearchParams(window.location.search);
         const preSelectedBook = urlParams.get('book');
 
