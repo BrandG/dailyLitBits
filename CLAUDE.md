@@ -532,6 +532,18 @@ calling it a success**, logging the book/chunk/user counts it found. An
 archive under that bar is a failure, and a failed run does not clean up older
 backups. Kept in `~/backups` for `RETENTION_DAYS` (3), gzipped.
 
+**Off-box copy (2026-11-26).** Before this, every backup lived only on the droplet it
+was protecting. If `BACKUP_OFFSITE` is set in `.env` (an rclone path, using the
+Drive remote BlueHorseshoe's backup already uses), each verified backup is uploaded
+there, checked to be listed, and copies older than `OFFSITE_RETENTION_DAYS` (30) are
+pruned. A failed upload makes the run exit 1. The copy is no use without `.env`: the
+addresses in it are encrypted with keys that live only there, so keep `.env`
+somewhere safe off the box as well. To pull one back:
+`rclone copy "<BACKUP_OFFSITE>/dailylitbits_YYYY-MM-DD_HH-MM-SS.db.gz" /tmp/`, then
+restore as below. First upload verified by downloading it, gunzipping and running
+the integrity check (123 books, 6 users). The 210 empty Mongo-era archives in
+`~/backups` were deleted the same day.
+
 That verification exists because the Mongo-era version wrote 23-byte files
 containing an authentication error every night for seven months while
 reporting success.

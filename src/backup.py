@@ -8,6 +8,12 @@ without credentials and wrote 23-byte files containing nothing but an
 authorisation error, every night for seven months, while reporting success.
 A backup nobody has restored is just a file taking up space - the restore
 command is in CLAUDE.md, and it is one line.
+
+Off-box copy (2026-11-26): if BACKUP_OFFSITE is set in .env (an rclone path,
+e.g. remote:folder), each verified backup is also uploaded there and copies
+older than OFFSITE_RETENTION_DAYS are pruned. Until then every backup lived
+only on the droplet it was protecting. Note the copy is useless without the
+keys in .env (emails are encrypted with them), so keep .env somewhere safe too.
 """
 import datetime
 import glob
@@ -15,6 +21,7 @@ import gzip
 import os
 import shutil
 import sqlite3
+import subprocess
 import sys
 import time
 
@@ -31,6 +38,8 @@ import config  # noqa: E402
 
 BACKUP_DIR = os.path.expanduser("~/backups")
 RETENTION_DAYS = 3
+OFFSITE = os.getenv("BACKUP_OFFSITE", "").strip()
+OFFSITE_RETENTION_DAYS = int(os.getenv("OFFSITE_RETENTION_DAYS", 30))
 
 
 def create_backup():
@@ -84,6 +93,34 @@ def create_backup():
     size_mb = os.path.getsize(final_path) / (1024 * 1024)
     log(f"Success! {os.path.basename(final_path)} ({size_mb:.2f} MB) - "
         f"integrity ok, {books} books, {chunks} chunks, {users} users")
+    return final_path
+
+
+def rclone(*args):
+    return subprocess.run(["rclone", *args], capture_output=True, text=True, timeout=1800)
+
+
+def upload_offsite(path):
+    """Copy one verified backup off the box, then prune old copies there.
+    Returns False on failure, so cron's exit status shows it."""
+    if not OFFSITE:
+        log("Off-box copy: BACKUP_OFFSITE not set, skipping.")
+        return True
+    log(f"Off-box copy: uploading {os.path.basename(path)}...")
+    up = rclone("copy", path, OFFSITE)
+    if up.returncode != 0:
+        log(f"Error: off-box upload failed: {up.stderr.strip()[-500:]}")
+        return False
+    listed = rclone("lsf", OFFSITE, "--include", os.path.basename(path))
+    if os.path.basename(path) not in listed.stdout:
+        log("Error: off-box upload reported success but the file is not there.")
+        return False
+    prune = rclone("delete", OFFSITE, "--min-age", f"{OFFSITE_RETENTION_DAYS}d",
+                   "--include", "dailylitbits_*.db.gz")
+    if prune.returncode != 0:
+        log(f"Warning: pruning old off-box copies failed: {prune.stderr.strip()[-300:]}")
+    kept = rclone("lsf", OFFSITE, "--include", "dailylitbits_*.db.gz").stdout.split()
+    log(f"Off-box copy: done, {len(kept)} kept (up to {OFFSITE_RETENTION_DAYS} days).")
     return True
 
 
@@ -103,7 +140,9 @@ def cleanup_old_backups():
 
 
 if __name__ == "__main__":
-    if create_backup():
-        cleanup_old_backups()
-    else:
+    final_path = create_backup()
+    if not final_path:
+        sys.exit(1)
+    cleanup_old_backups()
+    if not upload_offsite(final_path):
         sys.exit(1)
