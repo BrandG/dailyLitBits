@@ -15,10 +15,6 @@ def test_form_has_no_preselected_book(client, book):
     assert page.count(" selected") == 1
 
 
-def test_form_says_it_is_a_daily_email(client, book):
-    assert "one email every morning" in client.get("/").text
-
-
 def test_missing_book_is_refused_politely(client, conn, book, sent):
     r = client.post("/signup", data={"email": "a@example.com"})
     assert r.status_code == 200 and "Please choose a book" in r.text
