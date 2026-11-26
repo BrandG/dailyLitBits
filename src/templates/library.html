@@ -70,7 +70,7 @@
                         {% if state %}
                         <div class="book-state {{ state }}">{{ state_labels[state] }}</div>
                         {% if state in ('queued', 'paused') %}
-                        <a href="/switch_book?token={{ token }}&new_book_id={{ book.book_id }}"
+                        <a href="/switch_book?new_book_id={{ book.book_id }}"
                             class="btn btn-outline-primary btn-sm w-100">
                             {{ 'Resume this now' if state == 'paused' else 'Read this next' }}
                         </a>

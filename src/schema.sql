@@ -168,3 +168,14 @@ CREATE TABLE IF NOT EXISTS suppressions (
     occurred_at  TEXT,            -- when the provider recorded it, if known
     recorded_at  TEXT NOT NULL
 );
+
+-- "Email me my dashboard link" requests (2026-11-25), so the login form cannot
+-- be used to flood a reader's inbox. Rows older than a day are deleted on use.
+CREATE TABLE IF NOT EXISTS login_requests (
+    id           INTEGER PRIMARY KEY,
+    email_lookup TEXT NOT NULL,
+    ip_hash      TEXT,
+    created_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_login_lookup ON login_requests(email_lookup, created_at);
+CREATE INDEX IF NOT EXISTS idx_login_ip     ON login_requests(ip_hash, created_at);

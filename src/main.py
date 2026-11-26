@@ -34,6 +34,37 @@ from user_manager import UserManager
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# Pages that show or act on one reader. Never cached anywhere: not by a shared
+# proxy, and not in the browser's back/forward cache on a shared machine.
+PRIVATE_PATHS = ("/profile", "/admin", "/confirm", "/unsubscribe", "/next",
+                 "/switch_book", "/login", "/toggle_pause", "/update_preferences",
+                 "/queue", "/queue_book")
+
+
+@app.middleware("http")
+async def security_headers(request, call_next):
+    """Headers this app used to send none of (nginx adds them only for the
+    other sites on the box).
+
+    Referrer-Policy same-origin: several pages carry a token in their URL
+    (/next, /unsubscribe, /confirm, /admin); no other site ever sees one in a
+    Referer. frame-ancestors/X-Frame-Options: nobody can frame the dashboard
+    to trick a click. Cache-Control: see PRIVATE_PATHS, plus any request that
+    carries a token or the session cookie."""
+    response = await call_next(request)
+    h = response.headers
+    h.setdefault("X-Content-Type-Options", "nosniff")
+    h.setdefault("Referrer-Policy", "same-origin")
+    h.setdefault("X-Frame-Options", "DENY")
+    h.setdefault("Content-Security-Policy", "frame-ancestors 'none'")
+    h.setdefault("Strict-Transport-Security", "max-age=31536000")
+    path = request.url.path
+    if not path.startswith("/static/") and (
+            path.startswith(PRIVATE_PATHS) or "token" in request.query_params
+            or SESSION_COOKIE in request.cookies):
+        h["Cache-Control"] = "no-store"
+    return response
 templates = Jinja2Templates(directory="templates")
 # The signup form shows the Turnstile widget only when a site key is set.
 templates.env.globals["turnstile_site_key"] = config.TURNSTILE_SITE_KEY
@@ -752,7 +783,30 @@ async def login_page(request: Request):
 
 @app.post("/login", response_class=HTMLResponse)
 async def handle_login(request: Request, email: str = Form(...), conn=Depends(get_db)):
-    user = UserManager(conn).get_user_by_email(email)
+    manager = UserManager(conn)
+    user = manager.get_user_by_email(email)
+    lookup = manager.email_lookup(email)
+    ip_key = security.ip_hash(client_ip(request))
+    now = datetime.now(timezone.utc)
+    hour_ago = (now - timedelta(hours=1)).isoformat(timespec="seconds")
+
+    # Limits, so this form cannot bury a reader in dashboard emails. Counted
+    # for every request, registered address or not, and the answer is the same
+    # either way.
+    conn.execute("DELETE FROM login_requests WHERE created_at < ?",
+                 ((now - timedelta(days=1)).isoformat(timespec="seconds"),))
+    for_address = conn.execute(
+        "SELECT COUNT(*) FROM login_requests WHERE email_lookup = ? AND created_at >= ?",
+        (lookup, hour_ago)).fetchone()[0]
+    from_ip = conn.execute(
+        "SELECT COUNT(*) FROM login_requests WHERE ip_hash = ? AND created_at >= ?",
+        (ip_key, hour_ago)).fetchone()[0]
+    conn.execute("INSERT INTO login_requests (email_lookup, ip_hash, created_at) VALUES (?, ?, ?)",
+                 (lookup, ip_key, now.isoformat(timespec="seconds")))
+    if (for_address >= config.LOGIN_LINKS_PER_ADDRESS_PER_HOUR
+            or from_ip >= config.LOGIN_LINKS_PER_IP_PER_HOUR):
+        log(f"[WARN] Dashboard link refused: limit ({for_address}/address, {from_ip}/IP this hour)")
+        user = None
 
     # Always say the same thing: whether an address is registered is not
     # something a stranger should be able to probe.
@@ -980,7 +1034,12 @@ def confirm_page(heading, question, action, fields, button):
 
 
 @app.get("/switch_book", response_class=HTMLResponse)
-async def switch_book_confirm(token: str, new_book_id: str, conn=Depends(get_db)):
+async def switch_book_confirm(request: Request, new_book_id: str, token: str = None,
+                              conn=Depends(get_db)):
+    # A token in the URL (old emails, the victory email) still works; links
+    # drawn on our own pages rely on the session cookie instead, so the
+    # credential does not end up in browser history.
+    token = session_token(request, token)
     if not user_from_token(conn, token):
         return invalid_link()
     book = conn.execute("SELECT id, title FROM books WHERE id = ?", (new_book_id,)).fetchone()

@@ -39,7 +39,7 @@ def conn():
     connection = db.get_db()
     # events first: it references subscriptions, and rows left behind would
     # leak between tests that assert on the exact contents of the log.
-    for table in ("events", "pending_signups", "suppressions", "chunks", "subscriptions", "books", "users",
+    for table in ("events", "pending_signups", "suppressions", "login_requests", "chunks", "subscriptions", "books", "users",
                   "suggestions",
                   "acquisitions"):
         connection.execute(f"DELETE FROM {table}")

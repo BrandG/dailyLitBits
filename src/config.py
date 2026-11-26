@@ -43,6 +43,10 @@ FROM_EMAIL = os.getenv("EMAIL_SENDER")
 # Shown as the sender's name in the inbox: "dailyLitBits <pages@...>".
 FROM_NAME = os.getenv("EMAIL_SENDER_NAME", "dailyLitBits")
 
+# "Email me my dashboard link": per address, and per requesting IP.
+LOGIN_LINKS_PER_ADDRESS_PER_HOUR = int(os.getenv("LOGIN_LINKS_PER_ADDRESS_PER_HOUR", 3))
+LOGIN_LINKS_PER_IP_PER_HOUR = int(os.getenv("LOGIN_LINKS_PER_IP_PER_HOUR", 10))
+
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # Gemini model id, in one place because Google retires these. gemini-2.0-flash

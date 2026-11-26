@@ -109,7 +109,7 @@
                                     </form>
                                     {% endif %}
 
-                                    <a href="/switch_book?token={{ token }}&new_book_id={{ book.book_id }}"
+                                    <a href="/switch_book?new_book_id={{ book.book_id }}"
                                         class="btn btn-sm {{ 'btn-primary' if book.status == 'paused' else 'btn-outline-primary' }}">
                                         {{ 'Resume' if book.status == 'paused' else 'Start reading' }}
                                     </a>
